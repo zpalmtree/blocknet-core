@@ -195,8 +195,8 @@ func (c *gossipAttemptLRU) Set(pid peer.ID, t time.Time) {
 // DaemonConfig configures the daemon
 type DaemonConfig struct {
 	// P2P settings
-	ListenAddrs []string
-	SeedNodes   []string
+	ListenAddrs       []string
+	SeedNodes         []string
 	P2PWhitelistPeers []string
 	// Optional P2P peer limits (0 uses p2p defaults)
 	P2PMaxInbound  int
@@ -813,13 +813,12 @@ func (d *Daemon) releaseGossipBlockValidationSlot() {
 // Chain status callbacks for sync manager
 
 func (d *Daemon) getChainStatus() p2p.ChainStatus {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	snapshot := d.chain.TipSnapshot()
 
 	return p2p.ChainStatus{
-		BestHash:  d.chain.BestHash(),
-		Height:    d.chain.Height(),
-		TotalWork: d.chain.TotalWork(),
+		BestHash:  snapshot.BestHash,
+		Height:    snapshot.Height,
+		TotalWork: snapshot.TotalWork,
 		Version:   1,
 		NetworkID: params.NetworkID,
 		ChainID:   params.ChainID,
@@ -1144,34 +1143,94 @@ func (d *Daemon) processTxData(data []byte) error {
 }
 
 // Stats returns daemon statistics
+type DaemonCurrentProcessBlockStats struct {
+	Height                   uint64 `json:"height"`
+	TxCount                  int    `json:"tx_count"`
+	Stage                    string `json:"stage"`
+	StartedAtUnixMillis      int64  `json:"started_at_unix_millis"`
+	StageStartedAtUnixMillis int64  `json:"stage_started_at_unix_millis"`
+	ElapsedMillis            uint64 `json:"elapsed_millis"`
+	StageElapsedMillis       uint64 `json:"stage_elapsed_millis"`
+}
+
+type DaemonLastProcessBlockStats struct {
+	Height                uint64 `json:"height"`
+	TxCount               int    `json:"tx_count"`
+	CompletedAtUnixMillis int64  `json:"completed_at_unix_millis"`
+	ValidateMillis        uint64 `json:"validate_millis"`
+	CommitMillis          uint64 `json:"commit_millis"`
+	ReorgMillis           uint64 `json:"reorg_millis"`
+	TotalMillis           uint64 `json:"total_millis"`
+	Accepted              bool   `json:"accepted"`
+	MainChain             bool   `json:"main_chain"`
+	Error                 string `json:"error,omitempty"`
+}
+
 type DaemonStats struct {
-	PeerID       string `json:"peer_id"`
-	Peers        int    `json:"peers"`
-	ChainHeight  uint64 `json:"chain_height"`
-	BestHash     string `json:"best_hash"`
-	TotalWork    uint64 `json:"total_work"`
-	MempoolSize  int    `json:"mempool_size"`
-	MempoolBytes int    `json:"mempool_bytes"`
-	Syncing      bool   `json:"syncing"`
-	SyncProgress uint64 `json:"sync_progress,omitempty"`
-	SyncTarget   uint64 `json:"sync_target,omitempty"`
-	SyncPercent  string `json:"sync_percent,omitempty"`
-	IdentityAge  string `json:"identity_age"`
+	PeerID              string                          `json:"peer_id"`
+	Peers               int                             `json:"peers"`
+	ChainHeight         uint64                          `json:"chain_height"`
+	BestHash            string                          `json:"best_hash"`
+	TotalWork           uint64                          `json:"total_work"`
+	MempoolSize         int                             `json:"mempool_size"`
+	MempoolBytes        int                             `json:"mempool_bytes"`
+	Syncing             bool                            `json:"syncing"`
+	SyncProgress        uint64                          `json:"sync_progress,omitempty"`
+	SyncTarget          uint64                          `json:"sync_target,omitempty"`
+	SyncPercent         string                          `json:"sync_percent,omitempty"`
+	IdentityAge         string                          `json:"identity_age"`
+	CurrentProcessBlock *DaemonCurrentProcessBlockStats `json:"current_process_block,omitempty"`
+	LastProcessBlock    *DaemonLastProcessBlockStats    `json:"last_process_block,omitempty"`
 }
 
 func (d *Daemon) Stats() DaemonStats {
-	height, bestHash, totalWork := d.chain.TipFast()
+	snapshot := d.chain.TipSnapshot()
+	processBlock := d.chain.ProcessBlockSnapshot()
+	now := time.Now()
 
 	stats := DaemonStats{
 		PeerID:       d.node.PeerID().String(),
 		Peers:        len(d.node.Peers()),
-		ChainHeight:  height,
-		BestHash:     fmt.Sprintf("%x", bestHash[:8]),
-		TotalWork:    totalWork,
+		ChainHeight:  snapshot.Height,
+		BestHash:     fmt.Sprintf("%x", snapshot.BestHash[:8]),
+		TotalWork:    snapshot.TotalWork,
 		MempoolSize:  d.mempool.Size(),
 		MempoolBytes: d.mempool.SizeBytes(),
 		Syncing:      d.syncMgr.IsSyncing(),
 		IdentityAge:  d.node.IdentityAge().Round(time.Second).String(),
+	}
+	if processBlock.Active {
+		elapsedMillis := uint64(0)
+		stageElapsedMillis := uint64(0)
+		if processBlock.CurrentStartedAtUnixMillis > 0 {
+			elapsedMillis = uint64(now.Sub(time.UnixMilli(processBlock.CurrentStartedAtUnixMillis)) / time.Millisecond)
+		}
+		if processBlock.CurrentStageStartedAtUnixMillis > 0 {
+			stageElapsedMillis = uint64(now.Sub(time.UnixMilli(processBlock.CurrentStageStartedAtUnixMillis)) / time.Millisecond)
+		}
+		stats.CurrentProcessBlock = &DaemonCurrentProcessBlockStats{
+			Height:                   processBlock.CurrentHeight,
+			TxCount:                  processBlock.CurrentTxCount,
+			Stage:                    processBlock.CurrentStage,
+			StartedAtUnixMillis:      processBlock.CurrentStartedAtUnixMillis,
+			StageStartedAtUnixMillis: processBlock.CurrentStageStartedAtUnixMillis,
+			ElapsedMillis:            elapsedMillis,
+			StageElapsedMillis:       stageElapsedMillis,
+		}
+	}
+	if processBlock.LastCompletedAtUnixMillis > 0 {
+		stats.LastProcessBlock = &DaemonLastProcessBlockStats{
+			Height:                processBlock.LastHeight,
+			TxCount:               processBlock.LastTxCount,
+			CompletedAtUnixMillis: processBlock.LastCompletedAtUnixMillis,
+			ValidateMillis:        processBlock.LastValidateMillis,
+			CommitMillis:          processBlock.LastCommitMillis,
+			ReorgMillis:           processBlock.LastReorgMillis,
+			TotalMillis:           processBlock.LastTotalMillis,
+			Accepted:              processBlock.LastAccepted,
+			MainChain:             processBlock.LastMainChain,
+			Error:                 processBlock.LastError,
+		}
 	}
 
 	// Add sync progress if syncing
