@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"os"
@@ -68,6 +69,8 @@ const (
 	// Canonical block-header serialization sizes.
 	blockHeaderSerializedSize        = 4 + 8 + 32 + 32 + 8 + 8 + 8
 	blockHeaderSerializedSizeNoNonce = 4 + 8 + 32 + 32 + 8 + 8
+
+	slowProcessBlockLogThreshold = 2 * time.Second
 )
 
 // ============================================================================
@@ -976,6 +979,35 @@ type Chain struct {
 	// requiring checkpoint-height hashes to match.
 	trustedCheckpoints  map[uint64][32]byte
 	fastSyncUntilHeight uint64
+
+	tipSnapshot          atomic.Value
+	processBlockSnapshot atomic.Value
+}
+
+type chainTipSnapshot struct {
+	Height         uint64
+	BestHash       [32]byte
+	TotalWork      uint64
+	NextDifficulty uint64
+}
+
+type processBlockSnapshot struct {
+	Active                          bool
+	CurrentHeight                   uint64
+	CurrentTxCount                  int
+	CurrentStage                    string
+	CurrentStartedAtUnixMillis      int64
+	CurrentStageStartedAtUnixMillis int64
+	LastHeight                      uint64
+	LastTxCount                     int
+	LastCompletedAtUnixMillis       int64
+	LastValidateMillis              uint64
+	LastCommitMillis                uint64
+	LastReorgMillis                 uint64
+	LastTotalMillis                 uint64
+	LastAccepted                    bool
+	LastMainChain                   bool
+	LastError                       string
 }
 
 func chainProtectedBack() uint64 {
@@ -1064,6 +1096,46 @@ func (c *Chain) cacheTrimLocked() {
 	}
 }
 
+func (c *Chain) currentTipSnapshotLocked() chainTipSnapshot {
+	return chainTipSnapshot{
+		Height:         c.height,
+		BestHash:       c.bestHash,
+		TotalWork:      c.totalWork,
+		NextDifficulty: c.nextDifficultyLocked(),
+	}
+}
+
+func (c *Chain) updateTipSnapshotLocked() {
+	c.tipSnapshot.Store(c.currentTipSnapshotLocked())
+}
+
+func (c *Chain) TipSnapshot() chainTipSnapshot {
+	if snapshot, ok := c.tipSnapshot.Load().(chainTipSnapshot); ok {
+		return snapshot
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.currentTipSnapshotLocked()
+}
+
+func (c *Chain) currentProcessBlockSnapshot() processBlockSnapshot {
+	if snapshot, ok := c.processBlockSnapshot.Load().(processBlockSnapshot); ok {
+		return snapshot
+	}
+	return processBlockSnapshot{}
+}
+
+func (c *Chain) updateProcessBlockSnapshot(mutator func(*processBlockSnapshot)) {
+	snapshot := c.currentProcessBlockSnapshot()
+	mutator(&snapshot)
+	c.processBlockSnapshot.Store(snapshot)
+}
+
+func (c *Chain) ProcessBlockSnapshot() processBlockSnapshot {
+	return c.currentProcessBlockSnapshot()
+}
+
 func (c *Chain) cumulativeWorkAtLocked(hash [32]byte) (uint64, error) {
 	if work, ok := c.workAt[hash]; ok {
 		return work, nil
@@ -1122,6 +1194,7 @@ func NewChain(dataDir string) (*Chain, error) {
 		}
 		return nil, fmt.Errorf("failed to load chain state: %w", err)
 	}
+	c.updateTipSnapshotLocked()
 
 	return c, nil
 }
@@ -1524,6 +1597,7 @@ func (c *Chain) addBlockInternal(block *Block) error {
 	if len(c.timestamps) > LWMAWindow+1 {
 		c.timestamps = c.timestamps[1:]
 	}
+	c.updateTipSnapshotLocked()
 
 	return nil
 }
@@ -1533,6 +1607,68 @@ func (c *Chain) addBlockInternal(block *Block) error {
 func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	startedAt := time.Now()
+	currentStage := "validate"
+	stageStartedAt := startedAt
+	var validateDuration time.Duration
+	var commitDuration time.Duration
+	var reorgDuration time.Duration
+	if block != nil {
+		c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
+			snapshot.Active = true
+			snapshot.CurrentHeight = block.Header.Height
+			snapshot.CurrentTxCount = len(block.Transactions)
+			snapshot.CurrentStage = currentStage
+			snapshot.CurrentStartedAtUnixMillis = startedAt.UnixMilli()
+			snapshot.CurrentStageStartedAtUnixMillis = stageStartedAt.UnixMilli()
+		})
+	}
+	defer func() {
+		total := time.Since(startedAt)
+		c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
+			snapshot.Active = false
+			snapshot.CurrentHeight = 0
+			snapshot.CurrentTxCount = 0
+			snapshot.CurrentStage = ""
+			snapshot.CurrentStartedAtUnixMillis = 0
+			snapshot.CurrentStageStartedAtUnixMillis = 0
+			if block != nil {
+				snapshot.LastHeight = block.Header.Height
+				snapshot.LastTxCount = len(block.Transactions)
+			} else {
+				snapshot.LastHeight = 0
+				snapshot.LastTxCount = 0
+			}
+			snapshot.LastCompletedAtUnixMillis = time.Now().UnixMilli()
+			snapshot.LastValidateMillis = uint64(validateDuration / time.Millisecond)
+			snapshot.LastCommitMillis = uint64(commitDuration / time.Millisecond)
+			snapshot.LastReorgMillis = uint64(reorgDuration / time.Millisecond)
+			snapshot.LastTotalMillis = uint64(total / time.Millisecond)
+			snapshot.LastAccepted = accepted
+			snapshot.LastMainChain = isMainChain
+			if err != nil {
+				snapshot.LastError = err.Error()
+				return
+			}
+			snapshot.LastError = ""
+		})
+		if total < slowProcessBlockLogThreshold || block == nil {
+			return
+		}
+		log.Printf(
+			"[perf] slow ProcessBlock height=%d txs=%d validate=%s commit=%s reorg=%s total=%s accepted=%t main=%t err=%v",
+			block.Header.Height,
+			len(block.Transactions),
+			validateDuration,
+			commitDuration,
+			reorgDuration,
+			total,
+			accepted,
+			isMainChain,
+			err,
+		)
+	}()
 
 	hash := block.Hash()
 
@@ -1544,9 +1680,12 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 		return false, false, nil
 	}
 
+	validateStartedAt := time.Now()
 	if err := c.validateBlockForProcessLocked(block); err != nil {
+		validateDuration = time.Since(validateStartedAt)
 		return false, false, err
 	}
+	validateDuration = time.Since(validateStartedAt)
 
 	// Calculate work at this block
 	var parentWork uint64
@@ -1570,18 +1709,36 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 
 	// Does this create a heavier chain?
 	if blockWork > c.totalWork {
+		currentStage = "reorg"
+		stageStartedAt = time.Now()
+		c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
+			snapshot.CurrentStage = currentStage
+			snapshot.CurrentStageStartedAtUnixMillis = stageStartedAt.UnixMilli()
+		})
+		reorgStartedAt := time.Now()
 		if err := c.reorganizeTo(hash); err != nil {
+			reorgDuration = time.Since(reorgStartedAt)
 			// Reorg failed - remove from memory
 			c.cacheForgetLocked(hash)
 			return false, false, fmt.Errorf("reorg failed: %w", err)
 		}
+		reorgDuration = time.Since(reorgStartedAt)
 		return true, true, nil
 	}
 
 	// Block accepted but not on main chain (fork) - still save to storage
+	currentStage = "commit"
+	stageStartedAt = time.Now()
+	c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
+		snapshot.CurrentStage = currentStage
+		snapshot.CurrentStageStartedAtUnixMillis = stageStartedAt.UnixMilli()
+	})
+	commitStartedAt := time.Now()
 	if err := c.storage.SaveBlock(block); err != nil {
+		commitDuration = time.Since(commitStartedAt)
 		return false, false, fmt.Errorf("failed to save fork block: %w", err)
 	}
+	commitDuration = time.Since(commitStartedAt)
 
 	return true, false, nil
 }
@@ -2086,6 +2243,7 @@ func (c *Chain) reorganizeTo(newTip [32]byte) error {
 		}
 		c.updateCanonicalRingIndexForConnect([]*Block{newBlock}, newTip)
 		c.cacheTrimLocked()
+		c.updateTipSnapshotLocked()
 		return nil
 	}
 
@@ -2176,6 +2334,7 @@ func (c *Chain) reorganizeTo(newTip [32]byte) error {
 	c.updateCanonicalRingIndexForConnect(connect, newTip)
 	c.cacheTouchLocked(newTip)
 	c.cacheTrimLocked()
+	c.updateTipSnapshotLocked()
 
 	return nil
 }
@@ -2411,6 +2570,7 @@ func (c *Chain) TruncateToHeight(keepHeight uint64) error {
 	if err := c.storage.SetTip(newHash, keepHeight, newWork); err != nil {
 		return fmt.Errorf("failed to persist new tip: %w", err)
 	}
+	c.updateTipSnapshotLocked()
 
 	// Rebuild the canonical ring-member index while we still hold the write
 	// lock so concurrent read-lock callers (IsCanonicalRingMember,
@@ -2441,12 +2601,11 @@ type BlockTemplateParams struct {
 // TemplateParams returns the next-block height, previous hash, and difficulty
 // as a consistent snapshot.
 func (c *Chain) TemplateParams() BlockTemplateParams {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	snapshot := c.TipSnapshot()
 	return BlockTemplateParams{
-		Height:     c.height + 1,
-		PrevHash:   c.bestHash,
-		Difficulty: c.nextDifficultyLocked(),
+		Height:     snapshot.Height + 1,
+		PrevHash:   snapshot.BestHash,
+		Difficulty: snapshot.NextDifficulty,
 	}
 }
 
