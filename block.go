@@ -355,6 +355,60 @@ func validatePoW(header *BlockHeader) bool {
 	return PowCheckTarget(hash, target)
 }
 
+type validationStageReporter func(string)
+
+func (r validationStageReporter) Set(stage string) {
+	if r != nil {
+		r(stage)
+	}
+}
+
+type validationTimingBreakdown struct {
+	SpentContext      time.Duration
+	Checkpoint        time.Duration
+	ParentContext     time.Duration
+	Difficulty        time.Duration
+	TimestampRules    time.Duration
+	PoW               time.Duration
+	BlockShape        time.Duration
+	TxValidation      time.Duration
+	DuplicateKeyImage time.Duration
+	CoinbaseConsensus time.Duration
+	MerkleRoot        time.Duration
+	SkipPoW           bool
+	TxCount           int
+	NonCoinbaseTxs    int
+	InputCount        int
+	OutputCount       int
+}
+
+func (t validationTimingBreakdown) Summary() string {
+	powValue := t.PoW.String()
+	if t.SkipPoW {
+		powValue = "skipped"
+	}
+
+	return fmt.Sprintf(
+		"txs=%d non_coinbase=%d inputs=%d outputs=%d skip_pow=%t spent_ctx=%s checkpoint=%s parent_ctx=%s difficulty=%s timestamp=%s pow=%s block_shape=%s tx_validation=%s dup_key_images=%s coinbase_consensus=%s merkle_root=%s",
+		t.TxCount,
+		t.NonCoinbaseTxs,
+		t.InputCount,
+		t.OutputCount,
+		t.SkipPoW,
+		t.SpentContext,
+		t.Checkpoint,
+		t.ParentContext,
+		t.Difficulty,
+		t.TimestampRules,
+		powValue,
+		t.BlockShape,
+		t.TxValidation,
+		t.DuplicateKeyImage,
+		t.CoinbaseConsensus,
+		t.MerkleRoot,
+	)
+}
+
 // ValidateBlockP2P validates a block received from a peer over P2P.
 // This validation is chain-aware and enforces core consensus rules, while
 // still allowing side-chain/fork blocks that do not extend the current tip.
@@ -374,7 +428,7 @@ func ValidateBlockP2P(block *Block, chain *Chain) error {
 		chain.mu.RUnlock()
 	}
 
-	return validateBlockWithContext(
+	_, err := validateBlockWithContext(
 		block,
 		chain.BestHash(),
 		chain.Height(),
@@ -384,7 +438,9 @@ func ValidateBlockP2P(block *Block, chain *Chain) error {
 		skipPoW,
 		// Crypto is trusted below a checkpoint for the same reason PoW is.
 		skipPoW,
+		nil,
 	)
+	return err
 }
 
 func validateBlockWithContext(
@@ -396,117 +452,177 @@ func validateBlockWithContext(
 	isCanonicalRingMember RingMemberChecker,
 	skipPoW bool,
 	skipCrypto bool,
-) error {
+	stage validationStageReporter,
+) (validationTimingBreakdown, error) {
+	timing := validationTimingBreakdown{SkipPoW: skipPoW}
 	header := &block.Header
 
 	if header.Version == 0 {
-		return fmt.Errorf("invalid block version")
+		return timing, fmt.Errorf("invalid block version")
 	}
 	if header.Height == 0 {
-		return validateGenesisBlock(block)
+		stage.Set("genesis")
+		return timing, validateGenesisBlock(block)
 	}
 
 	// Parent/height consistency checks (for non-genesis blocks).
+	stage.Set("parent-context")
+	parentStartedAt := time.Now()
 	parent := getParent(header.PrevHash)
 	if parent == nil {
-		return ErrOrphanBlock
+		timing.ParentContext = time.Since(parentStartedAt)
+		return timing, ErrOrphanBlock
 	}
 	if header.Height != parent.Header.Height+1 {
-		return fmt.Errorf("invalid height linkage: parent=%d child=%d", parent.Header.Height, header.Height)
+		timing.ParentContext = time.Since(parentStartedAt)
+		return timing, fmt.Errorf("invalid height linkage: parent=%d child=%d", parent.Header.Height, header.Height)
 	}
 	// Basic timestamp sanity for non-tip extensions.
 	if header.Timestamp <= parent.Header.Timestamp {
-		return fmt.Errorf("timestamp %d <= parent timestamp %d", header.Timestamp, parent.Header.Timestamp)
+		timing.ParentContext = time.Since(parentStartedAt)
+		return timing, fmt.Errorf("timestamp %d <= parent timestamp %d", header.Timestamp, parent.Header.Timestamp)
 	}
 
 	// For blocks extending the current tip, height must align with our tip.
 	if header.PrevHash == bestHash {
 		if header.Height != tipHeight+1 {
-			return fmt.Errorf("invalid height: expected %d, got %d", tipHeight+1, header.Height)
+			timing.ParentContext = time.Since(parentStartedAt)
+			return timing, fmt.Errorf("invalid height: expected %d, got %d", tipHeight+1, header.Height)
 		}
 	}
+	timing.ParentContext = time.Since(parentStartedAt)
 
 	// Enforce parent-branch difficulty + median-time rules for all non-genesis blocks,
 	// including non-tip side-chain/fork blocks.
+	stage.Set("difficulty")
+	difficultyStartedAt := time.Now()
 	expectedDifficulty, err := expectedDifficultyFromParent(parent, getParent)
 	if err != nil {
-		return fmt.Errorf("failed to derive expected difficulty from parent context: %w", err)
+		timing.Difficulty = time.Since(difficultyStartedAt)
+		return timing, fmt.Errorf("failed to derive expected difficulty from parent context: %w", err)
 	}
 	if header.Difficulty != expectedDifficulty {
-		return fmt.Errorf("invalid difficulty: expected %d, got %d", expectedDifficulty, header.Difficulty)
+		timing.Difficulty = time.Since(difficultyStartedAt)
+		return timing, fmt.Errorf("invalid difficulty: expected %d, got %d", expectedDifficulty, header.Difficulty)
 	}
+	timing.Difficulty = time.Since(difficultyStartedAt)
 
+	stage.Set("timestamp-rules")
+	timestampStartedAt := time.Now()
 	medianTime, err := medianTimestampFromParent(parent, getParent, 11)
 	if err != nil {
-		return fmt.Errorf("failed to derive median timestamp from parent context: %w", err)
+		timing.TimestampRules = time.Since(timestampStartedAt)
+		return timing, fmt.Errorf("failed to derive median timestamp from parent context: %w", err)
 	}
 	if err := validateTimestampWithMedian(header, medianTime); err != nil {
-		return fmt.Errorf("invalid timestamp: %w", err)
+		timing.TimestampRules = time.Since(timestampStartedAt)
+		return timing, fmt.Errorf("invalid timestamp: %w", err)
 	}
 
 	if header.Difficulty < MinDifficulty {
-		return fmt.Errorf("difficulty %d below minimum %d", header.Difficulty, MinDifficulty)
+		timing.TimestampRules = time.Since(timestampStartedAt)
+		return timing, fmt.Errorf("difficulty %d below minimum %d", header.Difficulty, MinDifficulty)
 	}
 
 	// Always reject excessively-future timestamps.
 	maxTime := time.Now().Add(TimestampFuturLimit).Unix()
 	if header.Timestamp > maxTime {
-		return fmt.Errorf("timestamp too far in future")
+		timing.TimestampRules = time.Since(timestampStartedAt)
+		return timing, fmt.Errorf("timestamp too far in future")
 	}
+	timing.TimestampRules = time.Since(timestampStartedAt)
 
 	if !skipPoW {
+		stage.Set("pow")
+		powStartedAt := time.Now()
 		if !validatePoW(header) {
-			return fmt.Errorf("invalid proof of work")
+			timing.PoW = time.Since(powStartedAt)
+			return timing, fmt.Errorf("invalid proof of work")
 		}
+		timing.PoW = time.Since(powStartedAt)
 	}
 
+	stage.Set("block-shape")
+	blockShapeStartedAt := time.Now()
 	if block.Size() > MaxBlockSize {
-		return fmt.Errorf("block too large: %d > %d", block.Size(), MaxBlockSize)
+		timing.BlockShape = time.Since(blockShapeStartedAt)
+		return timing, fmt.Errorf("block too large: %d > %d", block.Size(), MaxBlockSize)
 	}
 
 	if len(block.Transactions) == 0 {
-		return fmt.Errorf("block has no transactions")
+		timing.BlockShape = time.Since(blockShapeStartedAt)
+		return timing, fmt.Errorf("block has no transactions")
 	}
+	timing.TxCount = len(block.Transactions)
 
 	if !block.Transactions[0].IsCoinbase() {
-		return fmt.Errorf("first transaction is not coinbase")
+		timing.BlockShape = time.Since(blockShapeStartedAt)
+		return timing, fmt.Errorf("first transaction is not coinbase")
 	}
 
-	for i := 1; i < len(block.Transactions); i++ {
-		if block.Transactions[i].IsCoinbase() {
-			return fmt.Errorf("multiple coinbase transactions")
+	for i, tx := range block.Transactions {
+		timing.OutputCount += len(tx.Outputs)
+		if tx.IsCoinbase() {
+			if i > 0 {
+				timing.BlockShape = time.Since(blockShapeStartedAt)
+				return timing, fmt.Errorf("multiple coinbase transactions")
+			}
+			continue
 		}
+		timing.NonCoinbaseTxs++
+		timing.InputCount += len(tx.Inputs)
 	}
+	timing.BlockShape = time.Since(blockShapeStartedAt)
 
-	// Validate all transactions and enforce no duplicated key images within the block.
-	seenKeyImages := make(map[[32]byte]struct{})
+	stage.Set("tx-validation")
+	txValidationStartedAt := time.Now()
 	for i, tx := range block.Transactions {
 		if err := validateTransaction(tx, isKeyImageSpent, isCanonicalRingMember, skipCrypto); err != nil {
-			return fmt.Errorf("invalid transaction %d: %w", i, err)
+			timing.TxValidation = time.Since(txValidationStartedAt)
+			return timing, fmt.Errorf("invalid transaction %d: %w", i, err)
 		}
+	}
+	timing.TxValidation = time.Since(txValidationStartedAt)
+
+	stage.Set("dup-key-images")
+	dupKeyImagesStartedAt := time.Now()
+	seenKeyImages := make(map[[32]byte]struct{})
+	for i, tx := range block.Transactions {
 		if tx.IsCoinbase() {
 			continue
 		}
 		for j, input := range tx.Inputs {
 			if _, exists := seenKeyImages[input.KeyImage]; exists {
-				return fmt.Errorf("invalid transaction %d input %d: duplicate key image in block", i, j)
+				timing.DuplicateKeyImage = time.Since(dupKeyImagesStartedAt)
+				return timing, fmt.Errorf("invalid transaction %d input %d: duplicate key image in block", i, j)
 			}
 			seenKeyImages[input.KeyImage] = struct{}{}
 		}
 	}
-	if err := validateCoinbaseConsensus(block.Transactions[0], header.Height); err != nil {
-		return fmt.Errorf("invalid coinbase consensus commitment: %w", err)
-	}
+	timing.DuplicateKeyImage = time.Since(dupKeyImagesStartedAt)
 
+	stage.Set("coinbase-consensus")
+	coinbaseConsensusStartedAt := time.Now()
+	if err := validateCoinbaseConsensus(block.Transactions[0], header.Height); err != nil {
+		timing.CoinbaseConsensus = time.Since(coinbaseConsensusStartedAt)
+		return timing, fmt.Errorf("invalid coinbase consensus commitment: %w", err)
+	}
+	timing.CoinbaseConsensus = time.Since(coinbaseConsensusStartedAt)
+
+	stage.Set("merkle-root")
+	merkleRootStartedAt := time.Now()
 	merkleRoot, err := block.ComputeMerkleRoot()
 	if err != nil {
-		return fmt.Errorf("failed to compute merkle root: %w", err)
+		timing.MerkleRoot = time.Since(merkleRootStartedAt)
+		return timing, fmt.Errorf("failed to compute merkle root: %w", err)
 	}
 	if merkleRoot != header.MerkleRoot {
-		return fmt.Errorf("invalid merkle root")
+		timing.MerkleRoot = time.Since(merkleRootStartedAt)
+		return timing, fmt.Errorf("invalid merkle root")
 	}
+	timing.MerkleRoot = time.Since(merkleRootStartedAt)
 
-	return nil
+	return timing, nil
 }
 
 func validateGenesisBlock(block *Block) error {
@@ -1136,6 +1252,24 @@ func (c *Chain) ProcessBlockSnapshot() processBlockSnapshot {
 	return c.currentProcessBlockSnapshot()
 }
 
+func (c *Chain) setProcessBlockStage(
+	block *Block,
+	currentStage *string,
+	stageStartedAt *time.Time,
+	stage string,
+) {
+	*currentStage = stage
+	*stageStartedAt = time.Now()
+	if block == nil {
+		return
+	}
+
+	c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
+		snapshot.CurrentStage = stage
+		snapshot.CurrentStageStartedAtUnixMillis = stageStartedAt.UnixMilli()
+	})
+}
+
 func (c *Chain) cumulativeWorkAtLocked(hash [32]byte) (uint64, error) {
 	if work, ok := c.workAt[hash]; ok {
 		return work, nil
@@ -1474,7 +1608,7 @@ func (c *Chain) addGenesisBlock(block *Block) error {
 	if _, _, _, found := c.storage.GetTip(); found {
 		return fmt.Errorf("genesis already exists; refusing unvalidated write path")
 	}
-	if err := c.validateBlockForProcessLocked(block); err != nil {
+	if _, err := c.validateBlockForProcessLocked(block, nil); err != nil {
 		return fmt.Errorf("invalid genesis block: %w", err)
 	}
 
@@ -1580,6 +1714,7 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	var validateDuration time.Duration
 	var commitDuration time.Duration
 	var reorgDuration time.Duration
+	var validateBreakdown validationTimingBreakdown
 	if block != nil {
 		c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
 			snapshot.Active = true
@@ -1634,6 +1769,11 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 			isMainChain,
 			err,
 		)
+		log.Printf(
+			"[perf] ProcessBlock validate detail height=%d %s",
+			block.Header.Height,
+			validateBreakdown.Summary(),
+		)
 	}()
 
 	hash := block.Hash()
@@ -1647,7 +1787,10 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	}
 
 	validateStartedAt := time.Now()
-	if err := c.validateBlockForProcessLocked(block); err != nil {
+	validateBreakdown, err = c.validateBlockForProcessLocked(block, func(substage string) {
+		c.setProcessBlockStage(block, &currentStage, &stageStartedAt, "validate:"+substage)
+	})
+	if err != nil {
 		validateDuration = time.Since(validateStartedAt)
 		return false, false, err
 	}
@@ -1675,12 +1818,7 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 
 	// Does this create a heavier chain?
 	if blockWork > c.totalWork {
-		currentStage = "reorg"
-		stageStartedAt = time.Now()
-		c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
-			snapshot.CurrentStage = currentStage
-			snapshot.CurrentStageStartedAtUnixMillis = stageStartedAt.UnixMilli()
-		})
+		c.setProcessBlockStage(block, &currentStage, &stageStartedAt, "reorg")
 		reorgStartedAt := time.Now()
 		if err := c.reorganizeTo(hash); err != nil {
 			reorgDuration = time.Since(reorgStartedAt)
@@ -1693,12 +1831,7 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	}
 
 	// Block accepted but not on main chain (fork) - still save to storage
-	currentStage = "commit"
-	stageStartedAt = time.Now()
-	c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
-		snapshot.CurrentStage = currentStage
-		snapshot.CurrentStageStartedAtUnixMillis = stageStartedAt.UnixMilli()
-	})
+	c.setProcessBlockStage(block, &currentStage, &stageStartedAt, "commit")
 	commitStartedAt := time.Now()
 	if err := c.storage.SaveBlock(block); err != nil {
 		commitDuration = time.Since(commitStartedAt)
@@ -1709,14 +1842,22 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	return true, false, nil
 }
 
-func (c *Chain) validateBlockForProcessLocked(block *Block) error {
+func (c *Chain) validateBlockForProcessLocked(
+	block *Block,
+	stage validationStageReporter,
+) (validationTimingBreakdown, error) {
+	var timing validationTimingBreakdown
 	isSpent := c.isKeyImageSpentLocked
 	isCanonicalRingMember := c.isCanonicalRingMemberLocked
 	if block != nil && block.Header.Height > 0 {
+		stage.Set("spent-context")
+		spentContextStartedAt := time.Now()
 		branchAwareSpent, err := c.branchAwareSpentCheckerLocked(block.Header.PrevHash)
 		if err != nil {
-			return err
+			timing.SpentContext = time.Since(spentContextStartedAt)
+			return timing, err
 		}
+		timing.SpentContext = time.Since(spentContextStartedAt)
 		isSpent = branchAwareSpent
 
 		branchAwareRingMembers, err := c.branchAwareRingMemberCheckerLocked(block.Header.PrevHash)
@@ -1729,14 +1870,18 @@ func (c *Chain) validateBlockForProcessLocked(block *Block) error {
 	// If checkpoints are enabled for fast sync, enforce checkpoint pinning.
 	// This ensures skipping PoW cannot be exploited to feed an alternate history.
 	if block != nil && c.trustedCheckpoints != nil && c.fastSyncUntilHeight > 0 && c.height < c.fastSyncUntilHeight {
+		stage.Set("checkpoint")
+		checkpointStartedAt := time.Now()
 		if block.Header.Height <= c.fastSyncUntilHeight {
 			if want, ok := c.trustedCheckpoints[block.Header.Height]; ok {
 				have := block.Hash()
 				if have != want {
-					return fmt.Errorf("checkpoint mismatch at height %d: have %x want %x", block.Header.Height, have[:8], want[:8])
+					timing.Checkpoint = time.Since(checkpointStartedAt)
+					return timing, fmt.Errorf("checkpoint mismatch at height %d: have %x want %x", block.Header.Height, have[:8], want[:8])
 				}
 			}
 		}
+		timing.Checkpoint = time.Since(checkpointStartedAt)
 	}
 
 	extendsTip := block != nil && block.Header.PrevHash == c.bestHash
@@ -1745,7 +1890,7 @@ func (c *Chain) validateBlockForProcessLocked(block *Block) error {
 		skipPoW = c.shouldSkipPoWLocked(block.Header.Height, extendsTip)
 	}
 
-	return validateBlockWithContext(
+	lowerTiming, err := validateBlockWithContext(
 		block,
 		c.bestHash,
 		c.height,
@@ -1757,7 +1902,11 @@ func (c *Chain) validateBlockForProcessLocked(block *Block) error {
 		// whole history, so skip the expensive RingCT/range-proof verification
 		// (the dominant cost of a fresh sync) on the same gate that skips PoW.
 		skipPoW,
+		stage,
 	)
+	lowerTiming.SpentContext = timing.SpentContext
+	lowerTiming.Checkpoint = timing.Checkpoint
+	return lowerTiming, err
 }
 
 // branchAwareSpentCheckerLocked returns a spent-check closure scoped to the
