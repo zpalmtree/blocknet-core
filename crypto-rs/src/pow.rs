@@ -3,7 +3,10 @@
 //! Memory-hard PoW to resist ASICs and ensure fair mining.
 //! Uses 2GB memory, making specialized hardware impractical.
 
-use argon2::{Algorithm, Argon2, Params, Version};
+mod fixed_argon;
+
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, OnceLock};
 
 /// Argon2id parameters for PoW
 /// - Memory: 2GB (2097152 KB)
@@ -11,9 +14,90 @@ use argon2::{Algorithm, Argon2, Params, Version};
 /// - Parallelism: 1 (single-threaded for fairness)
 /// - Output: 32 bytes
 const POW_MEMORY_KB: u32 = 2 * 1024 * 1024; // 2GB in KB
-const POW_ITERATIONS: u32 = 1;
-const POW_PARALLELISM: u32 = 1;
 const POW_OUTPUT_LEN: usize = 32;
+type PowOutput = [u8; POW_OUTPUT_LEN];
+
+static POW_KERNEL: OnceLock<PowKernel> = OnceLock::new();
+
+struct PowKernel {
+    hasher: fixed_argon::FixedArgon2id,
+    arenas: Mutex<Vec<Vec<fixed_argon::PowBlock>>>,
+}
+
+impl PowKernel {
+    fn new() -> Self {
+        Self {
+            hasher: fixed_argon::FixedArgon2id::new(POW_MEMORY_KB),
+            arenas: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn hash_into(&self, header: &[u8], nonce: u64, output: &mut PowOutput) -> Result<(), i32> {
+        let mut arena = self.checkout_arena()?;
+        hash_with_fixed_argon(&self.hasher, arena.deref_mut(), header, nonce, output)
+    }
+
+    fn checkout_arena(&self) -> Result<PowArenaGuard<'_>, i32> {
+        let mut arenas = self.arenas.lock().map_err(|_| -2)?;
+        let arena = arenas
+            .pop()
+            .unwrap_or_else(|| vec![fixed_argon::PowBlock::default(); self.hasher.block_count()]);
+        Ok(PowArenaGuard {
+            arenas: &self.arenas,
+            arena: Some(arena),
+        })
+    }
+}
+
+struct PowArenaGuard<'a> {
+    arenas: &'a Mutex<Vec<Vec<fixed_argon::PowBlock>>>,
+    arena: Option<Vec<fixed_argon::PowBlock>>,
+}
+
+impl Deref for PowArenaGuard<'_> {
+    type Target = [fixed_argon::PowBlock];
+
+    fn deref(&self) -> &Self::Target {
+        self.arena
+            .as_deref()
+            .expect("pow arena guard must always hold an arena")
+    }
+}
+
+impl DerefMut for PowArenaGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.arena
+            .as_deref_mut()
+            .expect("pow arena guard must always hold an arena")
+    }
+}
+
+impl Drop for PowArenaGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(arena) = self.arena.take() {
+            if let Ok(mut arenas) = self.arenas.lock() {
+                arenas.push(arena);
+            }
+        }
+    }
+}
+
+fn pow_kernel() -> &'static PowKernel {
+    POW_KERNEL.get_or_init(PowKernel::new)
+}
+
+fn hash_with_fixed_argon(
+    hasher: &fixed_argon::FixedArgon2id,
+    arena: &mut [fixed_argon::PowBlock],
+    header: &[u8],
+    nonce: u64,
+    output: &mut PowOutput,
+) -> Result<(), i32> {
+    let nonce_bytes = nonce.to_le_bytes();
+    hasher
+        .hash_password_into_with_memory(&nonce_bytes, header, output, arena)
+        .map_err(|_| -3)
+}
 
 /// Compute Argon2id hash for proof of work
 ///
@@ -35,26 +119,15 @@ pub extern "C" fn blocknet_pow_hash(
     }
 
     let header = unsafe { std::slice::from_raw_parts(header_ptr, header_len) };
-    let nonce_bytes = nonce.to_le_bytes();
-
-    // Create Argon2id hasher with PoW parameters
-    let params = match Params::new(POW_MEMORY_KB, POW_ITERATIONS, POW_PARALLELISM, Some(POW_OUTPUT_LEN)) {
-        Ok(p) => p,
-        Err(_) => return -2,
-    };
-
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
-    // Hash: password=nonce, salt=header
     let mut output = [0u8; POW_OUTPUT_LEN];
-    match argon2.hash_password_into(&nonce_bytes, header, &mut output) {
-        Ok(_) => {
+    match pow_kernel().hash_into(header, nonce, &mut output) {
+        Ok(()) => {
             unsafe {
                 std::ptr::copy_nonoverlapping(output.as_ptr(), output_ptr, POW_OUTPUT_LEN);
             }
             0
         }
-        Err(_) => -3,
+        Err(err) => err,
     }
 }
 
@@ -67,10 +140,7 @@ pub extern "C" fn blocknet_pow_hash(
 /// # Returns
 /// * 1 if hash < target (valid), 0 otherwise
 #[unsafe(no_mangle)]
-pub extern "C" fn blocknet_pow_check_target(
-    hash_ptr: *const u8,
-    target_ptr: *const u8,
-) -> i32 {
+pub extern "C" fn blocknet_pow_check_target(hash_ptr: *const u8, target_ptr: *const u8) -> i32 {
     if hash_ptr.is_null() || target_ptr.is_null() {
         return 0;
     }
@@ -93,10 +163,7 @@ pub extern "C" fn blocknet_pow_check_target(
 /// Convert difficulty to target
 /// Target = floor((2^256 - 1) / difficulty)
 #[unsafe(no_mangle)]
-pub extern "C" fn blocknet_difficulty_to_target(
-    difficulty: u64,
-    target_ptr: *mut u8,
-) -> i32 {
+pub extern "C" fn blocknet_difficulty_to_target(difficulty: u64, target_ptr: *mut u8) -> i32 {
     if target_ptr.is_null() || difficulty == 0 {
         return -1;
     }
@@ -129,7 +196,51 @@ pub extern "C" fn blocknet_difficulty_to_target(
 
 #[cfg(test)]
 mod tests {
+    use argon2::{Algorithm, Argon2, Params, Version};
+
     use super::*;
+
+    fn reference_pow_hash(header: &[u8], nonce: u64, memory_kib: u32) -> [u8; 32] {
+        let params = Params::new(memory_kib, 1, 1, Some(POW_OUTPUT_LEN))
+            .expect("reference params should be valid");
+        let reference = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut memory = vec![argon2::Block::default(); reference.params().block_count()];
+        let mut output = [0u8; 32];
+        reference
+            .hash_password_into_with_memory(&nonce.to_le_bytes(), header, &mut output, &mut memory)
+            .expect("reference hash should succeed");
+        output
+    }
+
+    #[test]
+    fn fixed_kernel_matches_reference_for_small_memory() {
+        let headers = [
+            b"12345678".as_slice(),
+            b"test_block_header_data".as_slice(),
+            b"headerbase0123456789abcdefghijklmnop".as_slice(),
+        ];
+        let memory_kib_values = [8u32, 32u32, 4096u32];
+        let nonces = [0u64, 1u64, 7u64, 42u64, 1_000_003u64];
+
+        for memory_kib in memory_kib_values {
+            let hasher = fixed_argon::FixedArgon2id::new(memory_kib);
+            let mut arena = vec![fixed_argon::PowBlock::default(); hasher.block_count()];
+
+            for header in headers {
+                for nonce in nonces {
+                    let mut actual = [0u8; 32];
+                    let expected = reference_pow_hash(header, nonce, memory_kib);
+
+                    hash_with_fixed_argon(&hasher, &mut arena, header, nonce, &mut actual)
+                        .expect("fixed kernel hash should succeed");
+                    assert_eq!(
+                        actual, expected,
+                        "mismatch for memory_kib={memory_kib} nonce={nonce}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_pow_hash() {
@@ -137,12 +248,7 @@ mod tests {
         let nonce: u64 = 12345;
         let mut output = [0u8; 32];
 
-        let result = blocknet_pow_hash(
-            header.as_ptr(),
-            header.len(),
-            nonce,
-            output.as_mut_ptr(),
-        );
+        let result = blocknet_pow_hash(header.as_ptr(), header.len(), nonce, output.as_mut_ptr());
 
         assert_eq!(result, 0, "PoW hash should succeed");
         assert_ne!(output, [0u8; 32], "Output should not be zero");
@@ -154,31 +260,48 @@ mod tests {
 
         // Different nonce should produce different hash
         let mut output3 = [0u8; 32];
-        blocknet_pow_hash(header.as_ptr(), header.len(), nonce + 1, output3.as_mut_ptr());
-        assert_ne!(output, output3, "Different nonce should produce different hash");
+        blocknet_pow_hash(
+            header.as_ptr(),
+            header.len(),
+            nonce + 1,
+            output3.as_mut_ptr(),
+        );
+        assert_ne!(
+            output, output3,
+            "Different nonce should produce different hash"
+        );
     }
 
     #[test]
     fn test_target_check() {
-        let hash = [0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-        
-        // Target with 3 leading zero bytes - hash should pass
-        let target_easy = [0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-        
-        // Target with 4 leading zero bytes - hash should fail
-        let target_hard = [0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
-                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let hash = [
+            0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,
+        ];
 
-        assert_eq!(blocknet_pow_check_target(hash.as_ptr(), target_easy.as_ptr()), 1);
-        assert_eq!(blocknet_pow_check_target(hash.as_ptr(), target_hard.as_ptr()), 0);
+        // Target with 3 leading zero bytes - hash should pass
+        let target_easy = [
+            0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+
+        // Target with 4 leading zero bytes - hash should fail
+        let target_hard = [
+            0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+
+        assert_eq!(
+            blocknet_pow_check_target(hash.as_ptr(), target_easy.as_ptr()),
+            1
+        );
+        assert_eq!(
+            blocknet_pow_check_target(hash.as_ptr(), target_hard.as_ptr()),
+            0
+        );
     }
 
     #[test]
