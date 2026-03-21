@@ -569,7 +569,7 @@
         "operationId": "loadWallet",
         "tags": ["Wallet"],
         "summary": "Load wallet",
-        "description": "Loads an existing wallet from disk, decrypting with the given password. Primarily used in `--daemon` mode where the app starts without a wallet. If `filepath` is provided, only the basename is used and the file is resolved relative to the configured `--wallet` directory; if omitted, the default wallet path is used. After loading, the wallet is unlocked, all wallet endpoints become available, miner reward keys are pointed at this wallet, and any blocks that arrived before the wallet was loaded are scanned automatically. Can only be called once — returns 409 if a wallet is already loaded.",
+        "description": "Loads an existing wallet from disk, decrypting with the given password. Primarily used in `--daemon` mode where the app starts without a wallet. If `filepath` is provided as an absolute path it is used as-is; if it is a basename, it is resolved relative to the configured `--wallet` directory. If omitted, the default wallet path is used. After loading, the wallet is unlocked, all wallet endpoints become available, miner reward keys are pointed at this wallet, and any blocks that arrived before the wallet was loaded are scanned automatically. Can only be called once — returns 409 if a wallet is already loaded.",
         "requestBody": {
           "required": true,
           "content": {
@@ -585,7 +585,7 @@
                   },
                   "filepath": {
                     "type": "string",
-                    "description": "Optional wallet filename (basename only, no path separators). Resolved relative to the configured `--wallet` directory. Defaults to the configured `--wallet` path."
+                    "description": "Optional wallet path. Absolute paths are used as-is; basenames are resolved relative to the configured `--wallet` directory. Defaults to the configured `--wallet` path."
                   }
                 }
               },
@@ -716,7 +716,7 @@
         "operationId": "createWallet",
         "tags": ["Wallet"],
         "summary": "Create new wallet",
-        "description": "Generates a new wallet with a fresh BIP39 seed, encrypts it with the given password, and saves it to disk. The wallet is loaded and unlocked in the running daemon. Since this is a brand-new wallet, no chain scanning is needed — the synced height is set to the current chain tip. Can only be called when no wallet is currently loaded (returns 409 otherwise). If `filename` is provided, only the basename is used and the file is placed in the same directory as the configured `--wallet` path; if omitted, the default wallet path is used. Will not overwrite an existing file.",
+        "description": "Generates a new wallet with a fresh BIP39 seed, encrypts it with the given password, and saves it to disk. The wallet is loaded and unlocked in the running daemon. Since this is a brand-new wallet, no chain scanning is needed — the synced height is set to the current chain tip. Can only be called when no wallet is currently loaded (returns 409 otherwise). If `filename` is provided as an absolute path it is used as-is; if it is a basename, it is placed in the same directory as the configured `--wallet` path. If omitted, the default wallet path is used. Will not overwrite an existing file.",
         "requestBody": {
           "required": true,
           "content": {
@@ -732,7 +732,7 @@
                   },
                   "filename": {
                     "type": "string",
-                    "description": "Optional wallet filename (basename only, no path separators). Defaults to the configured `--wallet` path."
+                    "description": "Optional wallet path. Absolute paths are used as-is; basenames are resolved relative to the configured `--wallet` path."
                   }
                 }
               },
@@ -853,7 +853,7 @@
         "operationId": "importWallet",
         "tags": ["Wallet"],
         "summary": "Import wallet from recovery seed",
-        "description": "Creates a new wallet from a BIP39 12-word recovery seed, encrypts it with the given password, and saves it to disk. The wallet is loaded and unlocked in the running daemon and the entire blockchain is scanned for outputs belonging to this seed. Can only be called when no wallet is currently loaded (returns 409 otherwise). If `filename` is provided, only the basename is used and the file is placed in the same directory as the configured `--wallet` path; if omitted, the default wallet path is used. Will not overwrite an existing file.",
+        "description": "Creates a new wallet from a BIP39 12-word recovery seed, encrypts it with the given password, and saves it to disk. The wallet is loaded and unlocked in the running daemon and the entire blockchain is scanned for outputs belonging to this seed. Can only be called when no wallet is currently loaded (returns 409 otherwise). If `filename` is provided as an absolute path it is used as-is; if it is a basename, it is placed in the same directory as the configured `--wallet` path. If omitted, the default wallet path is used. Will not overwrite an existing file.",
         "requestBody": {
           "required": true,
           "content": {
@@ -873,7 +873,7 @@
                   },
                   "filename": {
                     "type": "string",
-                    "description": "Optional wallet filename (basename only, no path separators). Defaults to the configured --wallet path."
+                    "description": "Optional wallet path. Absolute paths are used as-is; basenames are resolved relative to the configured `--wallet` path."
                   }
                 }
               },

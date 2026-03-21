@@ -1212,14 +1212,10 @@ func (s *APIServer) handleLoadWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	walletPath := s.cli.walletFile
-	if req.Filepath != "" {
-		base := filepath.Base(req.Filepath)
-		if base == "." || base == "/" {
-			writeError(w, http.StatusBadRequest, "invalid filepath")
-			return
-		}
-		walletPath = filepath.Join(filepath.Dir(s.cli.walletFile), base)
+	walletPath, err := resolveRequestedWalletPath(s.cli.walletFile, req.Filepath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid filepath")
+		return
 	}
 
 	password := []byte(req.Password)
@@ -1349,14 +1345,10 @@ func (s *APIServer) handleCreateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	walletPath := s.cli.walletFile
-	if req.Filename != "" {
-		base := filepath.Base(req.Filename)
-		if base == "." || base == "/" {
-			writeError(w, http.StatusBadRequest, "invalid filename")
-			return
-		}
-		walletPath = filepath.Join(filepath.Dir(s.cli.walletFile), base)
+	walletPath, err := resolveRequestedWalletPath(s.cli.walletFile, req.Filename)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid filename")
+		return
 	}
 
 	if _, err := os.Stat(walletPath); err == nil {
@@ -1467,15 +1459,10 @@ func (s *APIServer) handleImportWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve wallet path: basename only, same directory as configured --wallet path
-	walletPath := s.cli.walletFile
-	if req.Filename != "" {
-		base := filepath.Base(req.Filename)
-		if base == "." || base == "/" {
-			writeError(w, http.StatusBadRequest, "invalid filename")
-			return
-		}
-		walletPath = filepath.Join(filepath.Dir(s.cli.walletFile), base)
+	walletPath, err := resolveRequestedWalletPath(s.cli.walletFile, req.Filename)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid filename")
+		return
 	}
 
 	// Don't overwrite an existing file
@@ -2321,6 +2308,26 @@ func walletLoadClientError(err error) (int, string, bool) {
 		return http.StatusUnprocessableEntity, "wallet file is corrupted or truncated", true
 	}
 	return 0, "", false
+}
+
+func resolveRequestedWalletPath(configuredPath, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return configuredPath, nil
+	}
+
+	cleaned := filepath.Clean(requested)
+	if cleaned == "." || cleaned == string(filepath.Separator) {
+		return "", fmt.Errorf("invalid wallet path")
+	}
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	if filepath.VolumeName(cleaned) != "" || filepath.Base(cleaned) != cleaned {
+		return "", fmt.Errorf("invalid wallet path")
+	}
+
+	return filepath.Join(filepath.Dir(configuredPath), cleaned), nil
 }
 
 func walletSendClientError(err error) (int, string, bool) {

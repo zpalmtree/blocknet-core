@@ -175,6 +175,50 @@ func TestHandleLoadWallet_FilepathResolution(t *testing.T) {
 	}
 }
 
+func TestHandleLoadWallet_AbsoluteFilepathUsesProvidedPath(t *testing.T) {
+	chain, _, cleanup := mustCreateTestChain(t)
+	defer cleanup()
+	mustAddGenesisBlock(t, chain)
+
+	daemon, stopDaemon := mustStartTestDaemon(t, chain)
+	defer stopDaemon()
+
+	defaultDir := t.TempDir()
+	customDir := t.TempDir()
+	defaultPath := filepath.Join(defaultDir, "same.wallet.dat")
+	customPath := filepath.Join(customDir, "same.wallet.dat")
+
+	if _, err := wallet.NewWallet(defaultPath, []byte("default-password"), defaultWalletConfig()); err != nil {
+		t.Fatalf("failed to create default wallet: %v", err)
+	}
+	if _, err := wallet.NewWallet(customPath, []byte("custom-password"), defaultWalletConfig()); err != nil {
+		t.Fatalf("failed to create custom wallet: %v", err)
+	}
+
+	handler, _ := makeLoadServer(t, daemon, nil, nil, defaultPath)
+
+	body, err := json.Marshal(map[string]string{
+		"password": "custom-password",
+		"filepath": customPath,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	rr := doLoadReq(t, handler, body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if resp["filename"] != filepath.Base(customPath) {
+		t.Fatalf("expected filename=%s, got %v", filepath.Base(customPath), resp["filename"])
+	}
+}
+
 func TestHandleLoadWallet_FileNotFound(t *testing.T) {
 	chain, _, cleanup := mustCreateTestChain(t)
 	defer cleanup()

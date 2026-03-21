@@ -122,6 +122,40 @@ func TestHandleCreateWallet_CustomFilename(t *testing.T) {
 	}
 }
 
+func TestHandleCreateWallet_AbsoluteFilenameUsesProvidedPath(t *testing.T) {
+	chain, _, cleanup := mustCreateTestChain(t)
+	defer cleanup()
+	mustAddGenesisBlock(t, chain)
+
+	daemon, stopDaemon := mustStartTestDaemon(t, chain)
+	defer stopDaemon()
+
+	defaultDir := t.TempDir()
+	customDir := t.TempDir()
+	handler, _ := makeCreateServer(t, daemon, nil, nil, filepath.Join(defaultDir, "default.dat"))
+	customPath := filepath.Join(customDir, "custom.dat")
+
+	body, err := json.Marshal(map[string]string{
+		"password": "my-password",
+		"filename": customPath,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	rr := doCreateReq(t, handler, body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if !fileExists(customPath) {
+		t.Fatal("expected wallet to be created at the provided absolute path")
+	}
+	if fileExists(filepath.Join(defaultDir, "custom.dat")) {
+		t.Fatal("wallet should not be created relative to the configured default path when an absolute path is provided")
+	}
+}
+
 func TestHandleCreateWallet_FileAlreadyExists409(t *testing.T) {
 	chain, _, cleanup := mustCreateTestChain(t)
 	defer cleanup()
