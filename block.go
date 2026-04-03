@@ -1707,9 +1707,6 @@ func (c *Chain) isKeyImageSpentLocked(keyImage [32]byte) bool {
 }
 
 func (c *Chain) isCanonicalRingMemberLocked(pubKey, commitment [32]byte) bool {
-	if err := c.ensureCanonicalRingIndexLocked(); err != nil {
-		return false
-	}
 	_, ok := c.canonicalRingIndex[canonicalRingIndexKey(pubKey, commitment)]
 	return ok
 }
@@ -1721,6 +1718,20 @@ func canonicalRingIndexKey(pubKey, commitment [32]byte) [64]byte {
 	return key
 }
 
+func (c *Chain) canonicalRingIndexCurrentLocked() bool {
+	if c.canonicalRingIndexDirty || !c.canonicalRingIndexReady {
+		return false
+	}
+
+	tipHash, _, _, found := c.storage.GetTip()
+	if !found {
+		return c.canonicalRingIndexTip == [32]byte{}
+	}
+	return c.canonicalRingIndexTip == tipHash
+}
+
+// ensureCanonicalRingIndexLocked refreshes the canonical output-membership
+// index for the current main-chain tip. Caller must hold c.mu.Lock().
 func (c *Chain) ensureCanonicalRingIndexLocked() error {
 	tipHash, tipHeight, _, found := c.storage.GetTip()
 	if !found {
@@ -1731,7 +1742,7 @@ func (c *Chain) ensureCanonicalRingIndexLocked() error {
 		return nil
 	}
 
-	if !c.canonicalRingIndexDirty && c.canonicalRingIndexReady && c.canonicalRingIndexTip == tipHash {
+	if c.canonicalRingIndexCurrentLocked() {
 		return nil
 	}
 
@@ -1742,7 +1753,10 @@ func (c *Chain) ensureCanonicalRingIndexLocked() error {
 			return fmt.Errorf("canonical ring index missing block hash at height %d", h)
 		}
 
-		block := c.getBlockByHashLocked(hash)
+		block, err := c.storage.GetBlock(hash)
+		if err != nil {
+			return fmt.Errorf("canonical ring index failed to load block at height %d: %w", h, err)
+		}
 		if block == nil {
 			return fmt.Errorf("canonical ring index missing block data at height %d", h)
 		}
@@ -2257,9 +2271,26 @@ func (c *Chain) IsKeyImageSpent(keyImage [32]byte) bool {
 
 // IsCanonicalRingMember checks whether a ring member+commitment pair exists in canonical chain outputs.
 func (c *Chain) IsCanonicalRingMember(pubKey, commitment [32]byte) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.isCanonicalRingMemberLocked(pubKey, commitment)
+	key := canonicalRingIndexKey(pubKey, commitment)
+
+	for {
+		c.mu.RLock()
+		if c.canonicalRingIndexCurrentLocked() {
+			_, ok := c.canonicalRingIndex[key]
+			c.mu.RUnlock()
+			return ok
+		}
+		c.mu.RUnlock()
+
+		c.mu.Lock()
+		if err := c.ensureCanonicalRingIndexLocked(); err != nil {
+			c.mu.Unlock()
+			return false
+		}
+		_, ok := c.canonicalRingIndex[key]
+		c.mu.Unlock()
+		return ok
+	}
 }
 
 // GetAllOutputs returns all outputs for ring member selection
@@ -2275,16 +2306,29 @@ func (c *Chain) SelectRingMembersWithCommitments(realPubKey, realCommitment [32]
 	}
 
 	ringSize := RingSize
-
-	c.mu.RLock()
-	decoyPool := make([]*UTXO, 0, len(allOutputs))
-	for _, utxo := range allOutputs {
-		if utxo.Output.PublicKey != realPubKey &&
-			c.isCanonicalRingMemberLocked(utxo.Output.PublicKey, utxo.Output.Commitment) {
-			decoyPool = append(decoyPool, utxo)
+	var decoyPool []*UTXO
+	for {
+		c.mu.RLock()
+		if c.canonicalRingIndexCurrentLocked() {
+			decoyPool = make([]*UTXO, 0, len(allOutputs))
+			for _, utxo := range allOutputs {
+				if utxo.Output.PublicKey != realPubKey &&
+					c.isCanonicalRingMemberLocked(utxo.Output.PublicKey, utxo.Output.Commitment) {
+					decoyPool = append(decoyPool, utxo)
+				}
+			}
+			c.mu.RUnlock()
+			break
 		}
+		c.mu.RUnlock()
+
+		c.mu.Lock()
+		if err := c.ensureCanonicalRingIndexLocked(); err != nil {
+			c.mu.Unlock()
+			return nil, err
+		}
+		c.mu.Unlock()
 	}
-	c.mu.RUnlock()
 
 	if len(decoyPool) < ringSize-1 {
 		return nil, fmt.Errorf("not enough outputs for ring (need %d, have %d)", ringSize-1, len(decoyPool))
