@@ -3,7 +3,7 @@
 //! Memory-hard PoW to resist ASICs and ensure fair mining.
 //! Uses 2GB memory, making specialized hardware impractical.
 
-mod fixed_argon;
+use blocknet_pow_kernel as fixed_argon;
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Mutex, OnceLock};
