@@ -16,6 +16,7 @@ blake2 = "0.10"
 bulletproofs = "5.0"
 merlin = "3.0"
 argon2 = "0.5"
+blocknet-pow-kernel = { git = "https://github.com/zpalmtree/seine.git", rev = "8f9b5a9eb24d5f9cc55439e73b5d3298841a56bd" }
 
 [dev-dependencies]
 hex = "0.4"
