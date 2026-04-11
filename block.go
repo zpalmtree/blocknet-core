@@ -1894,10 +1894,10 @@ func (c *Chain) validateBlockForProcessLocked(
 		timing.SpentContext = time.Since(spentContextStartedAt)
 		isSpent = branchAwareSpent
 
-		branchAwareRingMembers, err := c.branchAwareRingMemberCheckerLocked(block.Header.PrevHash)
-		if err != nil {
-			return err
-		}
+			branchAwareRingMembers, err := c.branchAwareRingMemberCheckerLocked(block.Header.PrevHash)
+			if err != nil {
+				return timing, err
+			}
 		isCanonicalRingMember = branchAwareRingMembers
 	}
 
