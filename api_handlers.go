@@ -1103,12 +1103,6 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	ip := clientIP(r)
-	if !s.sendLimiter.allow(ip) {
-		writeError(w, http.StatusTooManyRequests, "send rate limit exceeded")
-		return
-	}
-
 	select {
 	case s.sendSem <- struct{}{}:
 		defer func() { <-s.sendSem }()
@@ -1298,12 +1292,6 @@ func (s *APIServer) handleSendAdvanced(w http.ResponseWriter, r *http.Request) {
 				s.sendIdem.abandon(cacheKey)
 			}
 		}()
-	}
-
-	ip := clientIP(r)
-	if !s.sendLimiter.allow(ip) {
-		writeError(w, http.StatusTooManyRequests, "send rate limit exceeded")
-		return
 	}
 
 	select {
