@@ -1633,15 +1633,11 @@
             }
           },
           "429": {
-            "description": "Rate limit or concurrency limit exceeded",
+            "description": "Concurrency limit exceeded",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" },
                 "examples": {
-                  "rate_limit": {
-                    "summary": "Per-IP rate limit",
-                    "value": { "error": "send rate limit exceeded" }
-                  },
                   "busy": {
                     "summary": "Concurrency semaphore full",
                     "value": { "error": "send busy, retry later" }
