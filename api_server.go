@@ -20,6 +20,13 @@ import (
 const maxRequestBodyBytes int64 = 1 << 20 // 1MB
 
 const (
+	apiReadTimeout = 10 * time.Second
+	// Wallet sends can spend tens of seconds constructing/signing many-input transactions.
+	apiWriteTimeout = 5 * time.Minute
+	apiIdleTimeout  = 60 * time.Second
+)
+
+const (
 	unlockFailureBaseDelay  = 250 * time.Millisecond
 	unlockFailureMaxDelay   = 5 * time.Second
 	unlockFailureLockout    = 30 * time.Second
@@ -467,9 +474,9 @@ func (s *APIServer) Start(addr string) error {
 	s.server = &http.Server{
 		Addr:         addr,
 		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  apiReadTimeout,
+		WriteTimeout: apiWriteTimeout,
+		IdleTimeout:  apiIdleTimeout,
 	}
 
 	ln, err := net.Listen("tcp", addr)
