@@ -52,24 +52,24 @@ type CLI struct {
 
 // CLIConfig holds CLI configuration
 type CLIConfig struct {
-	WalletFile      string
-	DataDir         string
-	ListenAddrs     []string
-	SeedNodes       []string
+	WalletFile        string
+	DataDir           string
+	ListenAddrs       []string
+	SeedNodes         []string
 	P2PWhitelistPeers []string
-	P2PMaxInbound   int // If >0, override default max inbound peers
-	P2PMaxOutbound  int // If >0, override default max outbound peers
-	SeedMode        bool
-	Mining          bool
-	MineThreads     int
-	RecoverMode     bool   // If true, prompt for mnemonic to recover wallet
-	DaemonMode      bool   // If true, run headless (no interactive prompts)
-	ExplorerAddr    string // HTTP address for block explorer (empty = disabled)
-	APIAddr         string // API listen address (empty = disabled)
-	NoColor         bool   // If true, disable colored output
-	NoVersionCheck  bool   // If true, skip remote version check on startup
-	SaveCheckpoints bool   // If true, append checkpoints every 100 blocks
-	FullSync        bool   // If true, bypass checkpoints and verify chain naturally
+	P2PMaxInbound     int // If >0, override default max inbound peers
+	P2PMaxOutbound    int // If >0, override default max outbound peers
+	SeedMode          bool
+	Mining            bool
+	MineThreads       int
+	RecoverMode       bool   // If true, prompt for mnemonic to recover wallet
+	DaemonMode        bool   // If true, run headless (no interactive prompts)
+	ExplorerAddr      string // HTTP address for block explorer (empty = disabled)
+	APIAddr           string // API listen address (empty = disabled)
+	NoColor           bool   // If true, disable colored output
+	NoVersionCheck    bool   // If true, skip remote version check on startup
+	SaveCheckpoints   bool   // If true, append checkpoints every 100 blocks
+	FullSync          bool   // If true, bypass checkpoints and verify chain naturally
 }
 
 // DefaultCLIConfig returns default CLI configuration
@@ -154,16 +154,16 @@ func NewCLI(cfg CLIConfig) (*CLI, error) {
 
 	// Create daemon config (shared by both modes)
 	daemonCfg := DaemonConfig{
-		DataDir:         cfg.DataDir,
-		ListenAddrs:     cfg.ListenAddrs,
-		SeedNodes:       cfg.SeedNodes,
+		DataDir:           cfg.DataDir,
+		ListenAddrs:       cfg.ListenAddrs,
+		SeedNodes:         cfg.SeedNodes,
 		P2PWhitelistPeers: cfg.P2PWhitelistPeers,
-		P2PMaxInbound:   cfg.P2PMaxInbound,
-		P2PMaxOutbound:  cfg.P2PMaxOutbound,
-		SeedMode:        cfg.SeedMode,
-		ExplorerAddr:    cfg.ExplorerAddr,
-		SaveCheckpoints: cfg.SaveCheckpoints,
-		FullSync:        cfg.FullSync,
+		P2PMaxInbound:     cfg.P2PMaxInbound,
+		P2PMaxOutbound:    cfg.P2PMaxOutbound,
+		SeedMode:          cfg.SeedMode,
+		ExplorerAddr:      cfg.ExplorerAddr,
+		SaveCheckpoints:   cfg.SaveCheckpoints,
+		FullSync:          cfg.FullSync,
 	}
 
 	// Daemon mode: start without a wallet, user loads one via API
@@ -502,18 +502,19 @@ func (c *CLI) recoverWalletAfterChainReset() {
 		return
 	}
 	chainHeight := c.daemon.Chain().Height()
-	walletHeight := c.wallet.SyncedHeight()
-	if walletHeight > chainHeight {
-		removed := c.wallet.RewindToHeight(chainHeight)
-		if removed > 0 {
-			fmt.Printf("  Chain reset: removed %d orphaned outputs, rewound to height %d\n", removed, chainHeight)
-			if err := c.wallet.Save(); err != nil {
-				fmt.Printf("  Warning: failed to persist rewound wallet: %v\n", err)
-			}
+	originalWalletHeight := c.wallet.SyncedHeight()
+	removed := rewindWalletToCanonicalTip(c.wallet, c.daemon.Chain())
+	if removed > 0 {
+		fmt.Printf("  Chain reset: removed %d orphaned outputs, rewound to height %d\n", removed, c.wallet.SyncedHeight())
+		if err := c.wallet.Save(); err != nil {
+			fmt.Printf("  Warning: failed to persist rewound wallet: %v\n", err)
 		}
-	} else if chainHeight > 0 && walletHeight == chainHeight {
-		// Conservative reorg recovery: if wallet and chain are at the same height,
-		// rewind one block to clear potentially stale same-height fork state.
+	}
+
+	walletHeight, walletHash := c.wallet.SyncedBlock()
+	if chainHeight > 0 && originalWalletHeight == chainHeight && walletHeight == chainHeight && !walletSyncHashKnown(walletHash) {
+		// Legacy wallets do not know which block hash they scanned at the tip.
+		// Rewind one block so the next scan records canonical hash metadata.
 		removed := c.wallet.RewindToHeight(chainHeight - 1)
 		if removed > 0 {
 			fmt.Printf("  Chain reset: removed %d orphaned outputs, rewound to height %d\n", removed, chainHeight-1)
@@ -1140,18 +1141,47 @@ func (c *CLI) autoScanBlocks() {
 			w := c.wallet
 			c.mu.RUnlock()
 
-			if scanner == nil {
+			if scanner == nil || w == nil {
 				continue
 			}
 
-			applyBlockToWallet(c.daemon.Chain(), w, scanner, block)
-			w.ReconcileUnconfirmedSpends(func(txID [32]byte) bool {
-				return c.daemon.Mempool().HasTransaction(txID)
-			})
+			if removed := rewindWalletToCanonicalTip(w, c.daemon.Chain()); removed > 0 {
+				unsaved++
+			}
 
-			unsaved++
-			if unsaved >= saveBatchSize {
-				doSave()
+			for {
+				walletHeight, walletHash := w.SyncedBlock()
+				chainHeight := c.daemon.Chain().Height()
+				if walletHeight >= chainHeight {
+					break
+				}
+
+				nextHeight := walletHeight + 1
+				canonical := c.daemon.Chain().GetBlockByHeight(nextHeight)
+				if canonical == nil {
+					break
+				}
+				if walletSyncHashKnown(walletHash) && canonical.Header.PrevHash != walletHash {
+					if walletHeight == 0 {
+						break
+					}
+					if removed := w.RewindToHeight(walletHeight - 1); removed > 0 {
+						unsaved++
+					}
+					continue
+				}
+
+				blockData := blockToScanData(canonical)
+				scanner.ScanBlock(blockData)
+				w.ReconcileUnconfirmedSpends(func(txID [32]byte) bool {
+					return c.daemon.Mempool().HasTransaction(txID)
+				})
+
+				w.SetSyncedBlock(blockData.Height, blockData.Hash)
+				unsaved++
+				if unsaved >= saveBatchSize {
+					doSave()
+				}
 			}
 		}
 	}
@@ -1234,6 +1264,7 @@ func (c *CLI) watchMinedBlocks() {
 func blockToScanData(block *Block) *wallet.BlockData {
 	data := &wallet.BlockData{
 		Height:       block.Header.Height,
+		Hash:         block.Hash(),
 		Transactions: make([]wallet.TxData, len(block.Transactions)),
 	}
 
