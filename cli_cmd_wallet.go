@@ -741,15 +741,17 @@ func (c *CLI) cmdSync() {
 	// Scan the whole batch with one spendable-key-image index (built once,
 	// maintained incrementally) instead of rebuilding it per block.
 	scannedTo := walletHeight
-	c.scanner.ScanBlocksReport(scanBlocks, func(h uint64, found, spent int) {
-		scannedTo = h
+	var scannedHash [32]byte
+	c.scanner.ScanBlocksReport(scanBlocks, func(block *wallet.BlockData, found, spent int) {
+		scannedTo = block.Height
+		scannedHash = block.Hash
 		if found > 0 || spent > 0 {
-			fmt.Printf("    Block %d: +%d outputs, %d spent\n", h, found, spent)
+			fmt.Printf("    Block %d: +%d outputs, %d spent\n", block.Height, found, spent)
 		}
 	})
 
 	if scannedTo > walletHeight {
-		c.wallet.SetSyncedHeight(scannedTo)
+		c.wallet.SetSyncedBlock(scannedTo, scannedHash)
 		fmt.Printf("  Wallet synced to height %d\n", scannedTo)
 	}
 }
