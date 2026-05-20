@@ -229,7 +229,7 @@ func TestValidateBlockWithContext_AcceptsSideBranchRingMembers(t *testing.T) {
 		t.Fatalf("failed to construct branch-aware spent checker: %v", err)
 	}
 
-	if err := validateBlockWithContext(
+	if _, err := validateBlockWithContext(
 		candidate,
 		chain.bestHash,
 		chain.height,
@@ -238,6 +238,7 @@ func TestValidateBlockWithContext_AcceptsSideBranchRingMembers(t *testing.T) {
 		chain.isCanonicalRingMemberLocked,
 		true,
 		true,
+		nil,
 	); err == nil || !strings.Contains(err.Error(), "not a canonical on-chain output") {
 		t.Fatalf("expected current canonical checker to reject side-branch ring members, got: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestValidateBlockWithContext_AcceptsSideBranchRingMembers(t *testing.T) {
 		t.Fatalf("failed to construct branch-aware ring checker: %v", err)
 	}
 
-	if err := validateBlockWithContext(
+	if _, err := validateBlockWithContext(
 		candidate,
 		chain.bestHash,
 		chain.height,
@@ -256,6 +257,7 @@ func TestValidateBlockWithContext_AcceptsSideBranchRingMembers(t *testing.T) {
 		ringChecker,
 		true,
 		true,
+		nil,
 	); err != nil {
 		t.Fatalf("expected branch-aware ring checker to accept side-branch block, got: %v", err)
 	}
