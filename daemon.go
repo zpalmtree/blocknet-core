@@ -566,7 +566,7 @@ func (d *Daemon) Start() error {
 	// Start peer ID endpoint for seed nodes
 	if d.seedMode && len(d.listenAddrs) > 0 {
 		port := peerIDPortFromMultiaddr(d.listenAddrs[0])
-		d.peerIDServer = startPeerIDServer(d.node, port)
+		d.peerIDServer = startPeerIDServer(d.node, d.getChainStatus, port)
 		log.Printf("Peer ID endpoint listening on :%d", port)
 	}
 

@@ -78,6 +78,7 @@ func NewExplorer(daemon *Daemon) *Explorer {
 	e.mux.HandleFunc("/tx/", e.handleTx)
 	e.mux.HandleFunc("/search", e.handleSearch)
 	e.mux.HandleFunc("/stats", e.handleStats)
+	e.mux.HandleFunc("/status.json", e.handleStatusJSON)
 	e.mux.HandleFunc("/prove", e.handleProve)
 	e.mux.HandleFunc("/prove-send", e.handleProveSend)
 	e.startStatsPrecompute()
@@ -609,6 +610,10 @@ func (e *Explorer) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderTemplate(w, explorerStatsTmpl, data)
+}
+
+func (e *Explorer) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, buildPublicChainStatus("", e.daemon.getChainStatus()))
 }
 
 // findTx searches for a transaction by hash in the blockchain.

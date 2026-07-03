@@ -74,12 +74,20 @@ func ResolveSeedNodes(hosts []string, p2pPort, peerIDPort int) []string {
 	return seeds
 }
 
-func startPeerIDServer(node *p2p.Node, port int) *http.Server {
+func startPeerIDServer(node *p2p.Node, getStatus func() p2p.ChainStatus, port int) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		fmt.Fprint(w, node.PeerID().String())
+	})
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		writeJSON(w, http.StatusOK, buildPublicChainStatus(node.PeerID().String(), getStatus()))
 	})
 
 	server := &http.Server{
