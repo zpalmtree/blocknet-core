@@ -1174,6 +1174,7 @@ type DaemonStats struct {
 	TotalWork           uint64                          `json:"total_work"`
 	MempoolSize         int                             `json:"mempool_size"`
 	MempoolBytes        int                             `json:"mempool_bytes"`
+	MempoolGeneration   uint64                          `json:"mempool_generation"`
 	Syncing             bool                            `json:"syncing"`
 	SyncProgress        uint64                          `json:"sync_progress,omitempty"`
 	SyncTarget          uint64                          `json:"sync_target,omitempty"`
@@ -1186,18 +1187,20 @@ type DaemonStats struct {
 func (d *Daemon) Stats() DaemonStats {
 	snapshot := d.chain.TipSnapshot()
 	processBlock := d.chain.ProcessBlockSnapshot()
+	mempoolStats := d.mempool.Stats()
 	now := time.Now()
 
 	stats := DaemonStats{
-		PeerID:       d.node.PeerID().String(),
-		Peers:        len(d.node.Peers()),
-		ChainHeight:  snapshot.Height,
-		BestHash:     fmt.Sprintf("%x", snapshot.BestHash[:8]),
-		TotalWork:    snapshot.TotalWork,
-		MempoolSize:  d.mempool.Size(),
-		MempoolBytes: d.mempool.SizeBytes(),
-		Syncing:      d.syncMgr.IsSyncing(),
-		IdentityAge:  d.node.IdentityAge().Round(time.Second).String(),
+		PeerID:            d.node.PeerID().String(),
+		Peers:             len(d.node.Peers()),
+		ChainHeight:       snapshot.Height,
+		BestHash:          fmt.Sprintf("%x", snapshot.BestHash[:8]),
+		TotalWork:         snapshot.TotalWork,
+		MempoolSize:       mempoolStats.Count,
+		MempoolBytes:      mempoolStats.SizeBytes,
+		MempoolGeneration: mempoolStats.Generation,
+		Syncing:           d.syncMgr.IsSyncing(),
+		IdentityAge:       d.node.IdentityAge().Round(time.Second).String(),
 	}
 	if processBlock.Active {
 		elapsedMillis := uint64(0)
