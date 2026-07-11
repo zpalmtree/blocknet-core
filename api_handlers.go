@@ -2323,8 +2323,9 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Get mempool transactions sorted by fee rate
-	txs := s.daemon.Mempool().GetTransactionsForBlock(MaxBlockSize-1000, 1000)
+	// Get mempool transactions sorted by fee rate together with the exact
+	// generation represented by this selection.
+	txs, mempoolGeneration := s.daemon.Mempool().GetTransactionsForBlockSnapshot(MaxBlockSize-1000, 1000)
 
 	// Build transaction list (coinbase first)
 	allTxs := make([]*Transaction, 0, len(txs)+1)
@@ -2378,6 +2379,7 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		"reward_address_used":         rewardAddrUsed,
 		"template_id":                 templateID,
 		"template_expires_at_unix_ms": expiresAt.UnixMilli(),
+		"mempool_generation":          mempoolGeneration,
 	})
 }
 
