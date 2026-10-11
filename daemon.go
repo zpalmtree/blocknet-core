@@ -3,15 +3,12 @@ package main
 import (
 	"container/list"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,9 +54,11 @@ type Daemon struct {
 	explorerAddr string
 
 	// Checkpoints
-	saveCheckpoints       bool
-	checkpointsFile       string
-	lastCheckpointWritten uint64
+	saveCheckpoints        bool
+	checkpointsFile        string
+	checkpointMu           sync.Mutex // serializes API and automatic checkpoint publication
+	lastCheckpointWritten  uint64
+	checkpointsInitialized bool
 
 	// Self-heal info (set during NewDaemon if chain was truncated)
 	repairTruncatedTo uint64
@@ -467,12 +466,8 @@ func NewDaemon(cfg DaemonConfig, stealthKeys *StealthKeys) (*Daemon, error) {
 	// Store explorer config
 	d.explorerAddr = cfg.ExplorerAddr
 
-	// Initialize checkpoint writer state (best-effort).
-	if d.saveCheckpoints {
-		if _, _, maxH, err := loadCheckpointsFile(d.checkpointsFile); err == nil && maxH > 0 {
-			d.lastCheckpointWritten = maxH
-		}
-	}
+	// Rebuild legacy append-only files against the finalized canonical chain.
+	d.maybeSaveCheckpoints()
 
 	return d, nil
 }
@@ -677,10 +672,9 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 	}
 
 	d.updateMempoolForAcceptedMainChain(&block, prevBest)
-	cp := d.prepareCheckpointLocked(&block)
 	d.mu.Unlock()
 
-	writeCheckpoint(cp)
+	d.maybeSaveCheckpoints()
 	d.node.RelayBlock(from, data)
 	d.notifyBlock(&block)
 	d.miner.NotifyNewBlock()
@@ -895,62 +889,10 @@ func (d *Daemon) processBlockData(data []byte) error {
 	}
 
 	d.updateMempoolForAcceptedMainChain(&block, prevBest)
-	cp := d.prepareCheckpointLocked(&block)
 	d.mu.Unlock()
 
-	writeCheckpoint(cp)
+	d.maybeSaveCheckpoints()
 	return nil
-}
-
-type checkpointEntry struct {
-	height uint64
-	line   string
-	file   string
-}
-
-// prepareCheckpointLocked checks whether a checkpoint should be written and
-// returns the entry to write. Caller must hold d.mu. The actual file I/O
-// should happen after releasing d.mu via writeCheckpoint.
-func (d *Daemon) prepareCheckpointLocked(block *Block) *checkpointEntry {
-	if !d.saveCheckpoints || block == nil {
-		return nil
-	}
-	h := block.Header.Height
-	if h == 0 || (h%100) != 0 {
-		return nil
-	}
-	if h <= d.lastCheckpointWritten {
-		return nil
-	}
-	if d.checkpointsFile == "" {
-		return nil
-	}
-	hash := block.Hash()
-	d.lastCheckpointWritten = h
-	return &checkpointEntry{
-		height: h,
-		line:   fmt.Sprintf("%d:%s\n", h, strings.ToUpper(hex.EncodeToString(hash[:]))),
-		file:   d.checkpointsFile,
-	}
-}
-
-func writeCheckpoint(entry *checkpointEntry) {
-	if entry == nil {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(entry.file), 0o755); err != nil {
-		log.Printf("Warning: failed to create checkpoints dir: %v", err)
-		return
-	}
-	f, err := os.OpenFile(entry.file, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		log.Printf("Warning: failed to append checkpoint: %v", err)
-		return
-	}
-	defer f.Close()
-	if _, err := io.WriteString(f, entry.line); err != nil {
-		log.Printf("Warning: failed to write checkpoint: %v", err)
-	}
 }
 
 // updateMempoolForAcceptedMainChain updates mempool contents for a newly
@@ -1191,11 +1133,11 @@ func (d *Daemon) Stats() DaemonStats {
 	now := time.Now()
 
 	stats := DaemonStats{
-		PeerID:       d.node.PeerID().String(),
-		Peers:        len(d.node.Peers()),
-		ChainHeight:  snapshot.Height,
-		BestHash:     fmt.Sprintf("%x", snapshot.BestHash[:8]),
-		TotalWork:    snapshot.TotalWork,
+		PeerID:            d.node.PeerID().String(),
+		Peers:             len(d.node.Peers()),
+		ChainHeight:       snapshot.Height,
+		BestHash:          fmt.Sprintf("%x", snapshot.BestHash[:8]),
+		TotalWork:         snapshot.TotalWork,
 		MempoolSize:       mempoolStats.Count,
 		MempoolBytes:      mempoolStats.SizeBytes,
 		MempoolGeneration: mempoolStats.Generation,
@@ -1292,15 +1234,15 @@ func (d *Daemon) SubmitBlock(block *Block) error {
 		return fmt.Errorf("block not accepted (duplicate or stale)")
 	}
 
-	var cp *checkpointEntry
 	if isMainChain {
 		d.updateMempoolForAcceptedMainChain(block, prevBest)
-		cp = d.prepareCheckpointLocked(block)
 		d.miner.NotifyNewBlock()
 	}
 	d.mu.Unlock()
 
-	writeCheckpoint(cp)
+	if isMainChain {
+		d.maybeSaveCheckpoints()
+	}
 
 	// Broadcast to peers
 	blockData, err := json.Marshal(block)

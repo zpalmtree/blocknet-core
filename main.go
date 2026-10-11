@@ -83,7 +83,7 @@ func main() {
 	apiAddr := flag.String("api", "", "API listen address (e.g. 127.0.0.1:8332)")
 	noColor := flag.Bool("nocolor", false, "Disable colored output")
 	noVersionCheck := flag.Bool("no-version-check", false, "Disable remote version check on startup")
-	saveCheckpoints := flag.Bool("save-checkpoints", false, "Append a record to checkpoints.dat every 100 blocks (writes to data dir)")
+	saveCheckpoints := flag.Bool("save-checkpoints", false, "Publish finalized canonical checkpoints every 100 blocks (writes to data dir)")
 	fullSync := flag.Bool("full-sync", false, "Bypass checkpoints (download + verification) and sync naturally from peers")
 	outputPeerAddr := flag.Bool("output-peer-address", false, "Load identity key, resolve public IP, write peer.txt and exit")
 	var p2pWhitelistPeers peerIDListFlag
