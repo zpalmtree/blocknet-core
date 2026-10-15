@@ -680,7 +680,11 @@ func (s *APIServer) handleSends(w http.ResponseWriter, r *http.Request) {
 	for _, view := range pageViews {
 		pageTxIDs = append(pageTxIDs, view.record.TxID)
 	}
-	txStates := s.walletSendChainStates(pageTxIDs, chainHeight)
+	txStates, err := s.walletSendChainStates(pageTxIDs, chainHeight)
+	if err != nil {
+		writeInternal(w, r, http.StatusInternalServerError, "unable to read transaction status", err)
+		return
+	}
 
 	sends := make([]sendEntry, 0, end-start)
 	for _, view := range pageViews {
@@ -3071,63 +3075,32 @@ type walletSendChainState struct {
 	inMempool     bool
 }
 
-func (s *APIServer) walletSendChainStates(txIDs [][32]byte, chainHeight uint64) map[[32]byte]walletSendChainState {
+func (s *APIServer) walletSendChainStates(txIDs [][32]byte, chainHeight uint64) (map[[32]byte]walletSendChainState, error) {
 	states := make(map[[32]byte]walletSendChainState, len(txIDs))
-	pending := make(map[[32]byte]struct{}, len(txIDs))
-
-	for _, txID := range txIDs {
-		if s.daemon.Mempool().HasTransaction(txID) {
-			states[txID] = walletSendChainState{chainState: "mempool", inMempool: true}
-			continue
-		}
-		pending[txID] = struct{}{}
-	}
-
-	storage := s.daemon.Chain().Storage()
-	if storage != nil && len(pending) > 0 {
-	scan:
-		for height := chainHeight; ; height-- {
-			hash, found := storage.GetBlockHashByHeight(height)
-			if !found {
-				if height == 0 {
-					break
-				}
-				continue
-			}
-
-			block, err := storage.GetBlock(hash)
-			if err == nil && block != nil {
-				for _, tx := range block.Transactions {
-					txID, _ := tx.TxID()
-					if _, ok := pending[txID]; !ok {
-						continue
-					}
-
-					confirmations := uint64(0)
-					if chainHeight >= height {
-						confirmations = chainHeight - height + 1
-					}
-					states[txID] = walletSendChainState{
-						chainState:    "confirmed",
-						confirmations: confirmations,
-					}
-					delete(pending, txID)
-					if len(pending) == 0 {
-						break scan
-					}
-				}
-			}
-
-			if height == 0 {
-				break
-			}
+	pending := make([][32]byte, 0, len(txIDs))
+	for _, id := range txIDs {
+		if s.daemon.Mempool().HasTransaction(id) {
+			states[id] = walletSendChainState{chainState: "mempool", inMempool: true}
+		} else {
+			pending = append(pending, id)
 		}
 	}
-
-	for txID := range pending {
-		states[txID] = walletSendChainState{chainState: "not_found"}
+	confirmed := map[[32]byte]uint64{}
+	if storage := s.daemon.Chain().Storage(); storage != nil && len(pending) > 0 {
+		var err error
+		confirmed, err = storage.CanonicalTransactionHeights(pending)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return states
+	for _, id := range pending {
+		if height, ok := confirmed[id]; ok && height <= chainHeight {
+			states[id] = walletSendChainState{chainState: "confirmed", confirmations: chainHeight - height + 1}
+		} else {
+			states[id] = walletSendChainState{chainState: "not_found"}
+		}
+	}
+	return states, nil
 }
 
 type walletTxBuildTimings struct {
