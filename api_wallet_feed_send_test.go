@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -185,6 +186,10 @@ func TestWalletFeedExternalSignerRoundTrip(t *testing.T) {
 	}
 	if ringCalls == 0 {
 		t.Fatal("builder did not use the ring-members endpoint")
+	}
+	// External signers compute the txid as SHA3-256 of the builder's bytes.
+	if sha3.Sum256(res.TxData) != res.TxID {
+		t.Fatal("transaction id is not SHA3-256 of the serialized bytes")
 	}
 	txHex := hex.EncodeToString(res.TxData)
 	idHex := hex.EncodeToString(res.TxID[:])
