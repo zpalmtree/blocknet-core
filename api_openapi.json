@@ -20,6 +20,151 @@
     }
   ],
   "paths": {
+    "/api/wallet-feed/blocks": {
+      "get": {
+        "operationId": "getWalletFeedBlocks",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Canonical scan data for external wallet services",
+        "description": "Returns up to `limit` canonical blocks starting at `from`, with every transaction's scan fields (tx public key, outputs, key images). All blocks and `tip` come from one consistent canonical snapshot, so each block's `prev_hash` links to the previous block. `from` above the tip returns an empty `blocks` array. Read-only; used by the hosted wallet service.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feed page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tip": {
+                      "type": "object",
+                      "properties": {
+                        "height": {
+                          "type": "integer"
+                        },
+                        "hash": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      }
+                    },
+                    "blocks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "height": {
+                            "type": "integer"
+                          },
+                          "hash": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "prev_hash": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "timestamp": {
+                            "type": "integer"
+                          },
+                          "transactions": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/WalletFeedTx"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed `from` or `limit` outside 1..100"
+          }
+        }
+      }
+    },
+    "/api/wallet-feed/tx/{txid}": {
+      "get": {
+        "operationId": "getWalletFeedTx",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Where a transaction is, with its scan data",
+        "description": "`status` is `mempool`, `canonical` (with `height` and `block_hash`) or `unknown` (200 with no `tx`).",
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "mempool",
+                        "canonical",
+                        "unknown"
+                      ]
+                    },
+                    "height": {
+                      "type": "integer"
+                    },
+                    "block_hash": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "tx": {
+                      "$ref": "#/components/schemas/WalletFeedTx"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "txid is not 64 hex characters"
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "operationId": "getHealth",
@@ -3248,6 +3393,59 @@
       }
     },
     "schemas": {
+      "WalletFeedTx": {
+        "type": "object",
+        "properties": {
+          "tx_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "tx_public_key": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "is_coinbase": {
+            "type": "boolean",
+            "description": "Transaction index 0 in a block above genesis"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "description": "Position in the transaction's outputs"
+                },
+                "public_key": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "commitment": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "encrypted_amount": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{16}$"
+                },
+                "encrypted_memo": {
+                  "type": "string",
+                  "description": "Fixed-size encrypted memo, hex"
+                }
+              }
+            }
+          },
+          "key_images": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Input key images in order"
+          }
+        }
+      },
       "Error": {
         "type": "object",
         "required": ["error"],

@@ -53,6 +53,10 @@ func (s *APIServer) registerPrivateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/checkpoints/save", s.handleSaveCheckpoints)
 	mux.HandleFunc("POST /api/checkpoints/load", s.handleLoadCheckpoints)
 
+	// Wallet feed (read-only scan data for external wallet services)
+	mux.HandleFunc("GET /api/wallet-feed/blocks", s.handleWalletFeedBlocks)
+	mux.HandleFunc("GET /api/wallet-feed/tx/{txid}", s.handleWalletFeedTx)
+
 	// Mining
 	mux.HandleFunc("GET /api/mining", s.handleMiningStatus)
 	mux.HandleFunc("POST /api/mining/start", s.handleMiningStart)
