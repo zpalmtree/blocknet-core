@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 name = "blocknet_crypto"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 curve25519-dalek = "4.1"
