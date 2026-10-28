@@ -2775,61 +2775,46 @@ func (s *APIServer) catchUpScan() {
 	}
 
 	ctx := s.cli.ctx
+	mu := &s.cli.walletScanMu
 
-	if removed := rewindWalletToCanonicalTip(w, s.daemon.Chain()); removed > 0 {
+	mu.Lock()
+	removed := rewindWalletToCanonicalTip(w, s.daemon.Chain())
+	mu.Unlock()
+	if removed > 0 {
 		if err := w.Save(); err != nil {
 			log.Printf("Warning: catchUpScan reorg save: %v", err)
 		}
 	}
 
-	walletHeight := w.SyncedHeight()
-	chainHeight := s.daemon.Chain().Height()
-	if walletHeight >= chainHeight {
-		return
-	}
-
-	for h := walletHeight + 1; h <= chainHeight; h++ {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		block := s.daemon.Chain().GetBlockByHeight(h)
-		if block == nil {
-			break
-		}
-		_, walletHash := w.SyncedBlock()
-		if walletSyncHashKnown(walletHash) && block.Header.PrevHash != walletHash {
-			if h <= 1 {
-				break
+	// While this runs the live block loop skips scanning; every step goes
+	// through syncWalletStep under walletScanMu and re-reads the chain tip, so
+	// blocks arriving meanwhile are picked up here.
+	catchUp := func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
-			if removed := w.RewindToHeight(h - 2); removed > 0 {
+			mu.Lock()
+			moved := syncWalletStep(s.daemon.Chain(), s.daemon.Mempool(), w, sc)
+			mu.Unlock()
+			if !moved {
+				return
+			}
+			if h := w.SyncedHeight(); h%100 == 0 || h == s.daemon.Chain().Height() {
 				if err := w.Save(); err != nil {
-					log.Printf("Warning: catchUpScan reorg save at height %d: %v", h, err)
+					log.Printf("Warning: catchUpScan save at height %d: %v", h, err)
 				}
 			}
-			h = w.SyncedHeight()
-			continue
-		}
-		sc.ScanBlock(blockToScanData(block))
-		w.ReconcileUnconfirmedSpends(func(txID [32]byte) bool {
-			return s.daemon.Mempool().HasTransaction(txID)
-		})
-		blockHash := block.Hash()
-		w.SetSyncedBlock(h, blockHash)
-
-		if h%100 == 0 || h == chainHeight {
-			if err := w.Save(); err != nil {
-				log.Printf("Warning: catchUpScan save at height %d: %v", h, err)
-			}
-		}
-
-		// Re-read chain height in case new blocks arrived during scan
-		if h == chainHeight {
-			chainHeight = s.daemon.Chain().Height()
 		}
 	}
+	s.cli.walletCatchUps.Add(1)
+	catchUp()
+	s.cli.walletCatchUps.Add(-1)
+	// A block the live loop skipped just before the count dropped is scanned
+	// here; later blocks are the live loop's again.
+	catchUp()
 }
 
 // ============================================================================

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,6 +49,14 @@ type CLI struct {
 	dataDir         string
 	walletFile      string
 	mu              sync.RWMutex // protects wallet/scanner/passwordHash during hot-load
+	// walletScanMu serialises every step that moves a wallet's synced tip
+	// (live blocks and catch-up after load/import), so concurrent scanners
+	// advance one shared cursor instead of rewinding each other.
+	walletScanMu sync.Mutex
+	// walletCatchUps counts running catch-up scans. While one runs, the live
+	// block loop leaves scanning to it (it re-reads the chain tip every step),
+	// so the wallet is not also re-encrypted every 50 blocks by the live loop.
+	walletCatchUps atomic.Int32
 }
 
 // CLIConfig holds CLI configuration
@@ -1146,39 +1155,24 @@ func (c *CLI) autoScanBlocks() {
 				continue
 			}
 
-			if removed := rewindWalletToCanonicalTip(w, c.daemon.Chain()); removed > 0 {
+			if c.walletCatchUps.Load() > 0 {
+				continue
+			}
+
+			c.walletScanMu.Lock()
+			removed := rewindWalletToCanonicalTip(w, c.daemon.Chain())
+			c.walletScanMu.Unlock()
+			if removed > 0 {
 				unsaved++
 			}
 
 			for {
-				walletHeight, walletHash := w.SyncedBlock()
-				chainHeight := c.daemon.Chain().Height()
-				if walletHeight >= chainHeight {
+				c.walletScanMu.Lock()
+				moved := syncWalletStep(c.daemon.Chain(), c.daemon.Mempool(), w, scanner)
+				c.walletScanMu.Unlock()
+				if !moved {
 					break
 				}
-
-				nextHeight := walletHeight + 1
-				canonical := c.daemon.Chain().GetBlockByHeight(nextHeight)
-				if canonical == nil {
-					break
-				}
-				if walletSyncHashKnown(walletHash) && canonical.Header.PrevHash != walletHash {
-					if walletHeight == 0 {
-						break
-					}
-					if removed := w.RewindToHeight(walletHeight - 1); removed > 0 {
-						unsaved++
-					}
-					continue
-				}
-
-				blockData := blockToScanData(canonical)
-				scanner.ScanBlock(blockData)
-				w.ReconcileUnconfirmedSpends(func(txID [32]byte) bool {
-					return c.daemon.Mempool().HasTransaction(txID)
-				})
-
-				w.SetSyncedBlock(blockData.Height, blockData.Hash)
 				unsaved++
 				if unsaved >= saveBatchSize {
 					doSave()
