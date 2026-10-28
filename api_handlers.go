@@ -1585,6 +1585,7 @@ func (s *APIServer) handleUnloadWallet(w http.ResponseWriter, r *http.Request) {
 	s.cli.passwordHash = [32]byte{}
 	s.cli.passwordHashSet = false
 	s.cli.mu.Unlock()
+	s.cli.waitForWalletScans()
 
 	writeJSON(w, http.StatusOK, map[string]any{"unloaded": true})
 }
@@ -2851,14 +2852,15 @@ func (s *APIServer) catchUpScan() {
 	removed := rewindWalletToCanonicalTip(w, s.daemon.Chain())
 	mu.Unlock()
 	if removed > 0 {
-		if err := w.Save(); err != nil {
+		if err := s.cli.saveScannedWallet(w); err != nil {
 			log.Printf("Warning: catchUpScan reorg save: %v", err)
 		}
 	}
 
 	// While this runs the live block loop skips scanning; every step goes
 	// through syncWalletStep under walletScanMu and re-reads the chain tip, so
-	// blocks arriving meanwhile are picked up here.
+	// blocks arriving meanwhile are picked up here. It stops once the wallet
+	// is unloaded or replaced.
 	catchUp := func() {
 		for {
 			select {
@@ -2866,14 +2868,11 @@ func (s *APIServer) catchUpScan() {
 				return
 			default:
 			}
-			mu.Lock()
-			moved := syncWalletStep(s.daemon.Chain(), s.daemon.Mempool(), w, sc)
-			mu.Unlock()
-			if !moved {
+			if !s.cli.scanWalletStep(w, sc) {
 				return
 			}
 			if h := w.SyncedHeight(); h%100 == 0 || h == s.daemon.Chain().Height() {
-				if err := w.Save(); err != nil {
+				if err := s.cli.saveScannedWallet(w); err != nil {
 					log.Printf("Warning: catchUpScan save at height %d: %v", h, err)
 				}
 			}

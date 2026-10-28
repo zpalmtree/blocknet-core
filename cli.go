@@ -57,6 +57,44 @@ type CLI struct {
 	// block loop leaves scanning to it (it re-reads the chain tip every step),
 	// so the wallet is not also re-encrypted every 50 blocks by the live loop.
 	walletCatchUps atomic.Int32
+	// walletSaveMu serialises background scan saves with unload, so no scan
+	// writes a wallet file after its unload returns.
+	walletSaveMu sync.Mutex
+}
+
+// walletLoaded reports whether w is still the loaded wallet. Background scans
+// stop once their wallet is unloaded or replaced.
+func (c *CLI) walletLoaded(w *wallet.Wallet) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return w != nil && c.wallet == w
+}
+
+// scanWalletStep is syncWalletStep for the background scans: it moves w only
+// while w is still loaded.
+func (c *CLI) scanWalletStep(w *wallet.Wallet, sc *wallet.Scanner) bool {
+	c.walletScanMu.Lock()
+	defer c.walletScanMu.Unlock()
+	return c.walletLoaded(w) && syncWalletStep(c.daemon.Chain(), c.daemon.Mempool(), w, sc)
+}
+
+// saveScannedWallet saves scan progress for w unless it was unloaded.
+func (c *CLI) saveScannedWallet(w *wallet.Wallet) error {
+	c.walletSaveMu.Lock()
+	defer c.walletSaveMu.Unlock()
+	if !c.walletLoaded(w) {
+		return nil
+	}
+	return w.Save()
+}
+
+// waitForWalletScans returns once any scan step or save in flight finishes;
+// after the wallet references are cleared, no later one starts.
+func (c *CLI) waitForWalletScans() {
+	c.walletScanMu.Lock()
+	c.walletScanMu.Unlock()
+	c.walletSaveMu.Lock()
+	c.walletSaveMu.Unlock()
 }
 
 // CLIConfig holds CLI configuration
@@ -1134,7 +1172,7 @@ func (c *CLI) autoScanBlocks() {
 		if w == nil {
 			return
 		}
-		if err := w.Save(); err != nil {
+		if err := c.saveScannedWallet(w); err != nil {
 			fmt.Printf("  Warning: failed to persist wallet scan updates: %v\n", err)
 		}
 		unsaved = 0
@@ -1174,10 +1212,7 @@ func (c *CLI) autoScanBlocks() {
 			}
 
 			for {
-				c.walletScanMu.Lock()
-				moved := syncWalletStep(c.daemon.Chain(), c.daemon.Mempool(), w, scanner)
-				c.walletScanMu.Unlock()
-				if !moved {
+				if !c.scanWalletStep(w, scanner) {
 					break
 				}
 				unsaved++
