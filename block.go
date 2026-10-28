@@ -1742,9 +1742,25 @@ func (c *Chain) addBlockInternal(block *Block) error {
 	return nil
 }
 
+// processBlockTimings is the stage breakdown of one ProcessBlock call.
+type processBlockTimings struct {
+	Validate time.Duration
+	Reorg    time.Duration
+	Commit   time.Duration
+	Total    time.Duration
+	Detail   validationTimingBreakdown
+}
+
 // ProcessBlock validates and adds a block, handling fork choice
 // Returns true if block was accepted (even if not on main chain)
 func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err error) {
+	accepted, isMainChain, _, err = c.ProcessBlockTimed(block)
+	return accepted, isMainChain, err
+}
+
+// ProcessBlockTimed is ProcessBlock plus its stage timings, so callers can
+// attribute latency to the path (submit, gossip, sync) that delivered the block.
+func (c *Chain) ProcessBlockTimed(block *Block) (accepted bool, isMainChain bool, timings processBlockTimings, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1767,6 +1783,13 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	}
 	defer func() {
 		total := time.Since(startedAt)
+		timings = processBlockTimings{
+			Validate: validateDuration,
+			Reorg:    reorgDuration,
+			Commit:   commitDuration,
+			Total:    total,
+			Detail:   validateBreakdown,
+		}
 		c.updateProcessBlockSnapshot(func(snapshot *processBlockSnapshot) {
 			snapshot.Active = false
 			snapshot.CurrentHeight = 0
@@ -1820,10 +1843,10 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 
 	// Already have this block? Check memory and storage
 	if _, exists := c.blocks[hash]; exists {
-		return false, false, nil
+		return false, false, timings, nil
 	}
 	if c.storage.HasBlock(hash) {
-		return false, false, nil
+		return false, false, timings, nil
 	}
 
 	validateStartedAt := time.Now()
@@ -1832,7 +1855,7 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	})
 	if err != nil {
 		validateDuration = time.Since(validateStartedAt)
-		return false, false, err
+		return false, false, timings, err
 	}
 	validateDuration = time.Since(validateStartedAt)
 
@@ -1842,12 +1865,12 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 		var err error
 		parentWork, err = c.cumulativeWorkAtLocked(block.Header.PrevHash)
 		if err != nil {
-			return false, false, fmt.Errorf("failed to compute parent work: %w", err)
+			return false, false, timings, fmt.Errorf("failed to compute parent work: %w", err)
 		}
 	}
 	blockWork, err := addCumulativeWork(parentWork, block.Header.Difficulty)
 	if err != nil {
-		return false, false, fmt.Errorf("failed to compute cumulative work: %w", err)
+		return false, false, timings, fmt.Errorf("failed to compute cumulative work: %w", err)
 	}
 
 	// Store block in memory (always, even if not main chain)
@@ -1864,10 +1887,10 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 			reorgDuration = time.Since(reorgStartedAt)
 			// Reorg failed - remove from memory
 			c.cacheForgetLocked(hash)
-			return false, false, fmt.Errorf("reorg failed: %w", err)
+			return false, false, timings, fmt.Errorf("reorg failed: %w", err)
 		}
 		reorgDuration = time.Since(reorgStartedAt)
-		return true, true, nil
+		return true, true, timings, nil
 	}
 
 	// Block accepted but not on main chain (fork) - still save to storage
@@ -1875,11 +1898,11 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 	commitStartedAt := time.Now()
 	if err := c.storage.SaveBlock(block); err != nil {
 		commitDuration = time.Since(commitStartedAt)
-		return false, false, fmt.Errorf("failed to save fork block: %w", err)
+		return false, false, timings, fmt.Errorf("failed to save fork block: %w", err)
 	}
 	commitDuration = time.Since(commitStartedAt)
 
-	return true, false, nil
+	return true, false, timings, nil
 }
 
 func (c *Chain) validateBlockForProcessLocked(

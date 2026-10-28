@@ -3384,7 +3384,8 @@
                   "reward_address_used": "3wZc3y1Qw4eYpZtGJxkqkV6xG9c2oXHqfJjQ6b3sR5hYhJ8tZz1qvJ1mY1a9o7hV4pYwqH7xG5d5d8cJ8p4",
                   "template_id": "7b3d2f4a9d11c8ef",
                   "template_expires_at_unix_ms": 1738800840000,
-                  "mempool_generation": 17
+                  "mempool_generation": 17,
+                  "build_us": 1850
                 }
               }
             }
@@ -3509,13 +3510,19 @@
                   "properties": {
                     "accepted": { "type": "boolean" },
                     "hash": { "type": "string", "description": "Block hash (64 hex chars)" },
-                    "height": { "type": "integer", "description": "Block height" }
+                    "height": { "type": "integer", "description": "Block height" },
+                    "timings_us": {
+                      "type": "object",
+                      "description": "Daemon-side stage durations for this submission in microseconds: request_decode, lock_wait, stale_check, process (with validate, pow, tx_validation, reorg), mempool_update, checkpoint_save, marshal, broadcast, notify and total.",
+                      "additionalProperties": { "type": "integer" }
+                    }
                   }
                 },
                 "example": {
                   "accepted": true,
                   "hash": "0000d4b5a8e7c3f2910b6e5d4c3a2f1e0d9c8b7a6f5e4d3c2b1a09f8e7d6c5b4",
-                  "height": 14208
+                  "height": 14208,
+                  "timings_us": { "request_decode": 120, "lock_wait": 15, "stale_check": 4, "process": 184000, "validate": 171000, "pow": 152000, "tx_validation": 9000, "reorg": 12000, "mempool_update": 350, "checkpoint_save": 0, "marshal": 210, "broadcast": 95, "notify": 30, "total": 185100 }
                 }
               }
             }
@@ -3537,6 +3544,50 @@
                   "duplicate": {
                     "summary": "Already known",
                     "value": { "error": "block not accepted (duplicate or stale)" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/perf/latency": {
+      "get": {
+        "operationId": "getPerfLatency",
+        "tags": ["Mining"],
+        "summary": "Block-path latency histograms",
+        "description": "Process-lifetime latency histograms for the block pipeline, keyed by family and then stage lane. Families: `daemon_submit_block` (POST /api/mining/submitblock stages), `daemon_peer_block` (gossiped blocks from receipt to relay), `daemon_process_block` (ProcessBlock stages prefixed by source: submit, gossip or sync), `daemon_block_template` (template build stages) and `daemon_events` (new_block SSE delivery). Bucket bounds match blocknet-pool monitor histograms.",
+        "responses": {
+          "200": {
+            "description": "Latency histograms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "families": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "bounds_millis": { "type": "array", "items": { "type": "integer" }, "description": "Inclusive bucket upper bounds in milliseconds" },
+                            "counts": { "type": "array", "items": { "type": "integer" }, "description": "Per-bucket (not cumulative) counts; the extra last entry is +Inf" },
+                            "sum_micros": { "type": "integer" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "families": {
+                    "daemon_submit_block": {
+                      "total": { "bounds_millis": [1, 2, 5], "counts": [0, 0, 3, 1], "sum_micros": 20500 }
+                    }
                   }
                 }
               }
@@ -3618,7 +3669,7 @@
         "operationId": "getEvents",
         "tags": ["Events"],
         "summary": "Real-time event stream (SSE)",
-        "description": "Server-Sent Events stream for real-time updates. On connection, emits a `connected` event with current chain state. Then streams `new_block` for every new block added to the chain and `mined_block` for blocks mined by this node. Sends SSE comment keepalives every 30s. Write timeout is disabled for this long-lived connection.",
+        "description": "Server-Sent Events stream for real-time updates. On connection, emits a `connected` event with current chain state. Then streams `new_block` for every new block added to the chain and `mined_block` for blocks mined by this node. `new_block` events for blocks this process accepted also carry `source` (`submit`, `gossip` or `sync`), `received_at_unix_us` and `accepted_at_unix_us` (daemon wall clock) so subscribers can measure tip delivery latency. Sends SSE comment keepalives every 30s. Write timeout is disabled for this long-lived connection.",
         "responses": {
           "200": {
             "description": "SSE event stream (long-lived connection)",
@@ -3635,7 +3686,7 @@
                   },
                   "new_block": {
                     "summary": "New block added to chain",
-                    "value": "event: new_block\ndata: {\"height\":14208,\"hash\":\"0000d4b5a8e7c3f2910b6e5d4c3a2f1e0d9c8b7a6f5e4d3c2b1a09f8e7d6c5b4\",\"timestamp\":1738800240,\"tx_count\":3}\n\n"
+                    "value": "event: new_block\ndata: {\"height\":14208,\"hash\":\"0000d4b5a8e7c3f2910b6e5d4c3a2f1e0d9c8b7a6f5e4d3c2b1a09f8e7d6c5b4\",\"timestamp\":1738800240,\"tx_count\":3,\"source\":\"gossip\",\"received_at_unix_us\":1738800241102345,\"accepted_at_unix_us\":1738800241290871}\n\n"
                   },
                   "mined_block": {
                     "summary": "Block mined by this node",
@@ -4731,6 +4782,11 @@
             "type": "integer",
             "format": "int64",
             "description": "Exact mempool generation represented by the template transaction selection. Compare with /api/status mempool_generation to detect same-tip content changes."
+          },
+          "build_us": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the daemon spent building this template, in microseconds."
           }
         },
         "required": ["block", "target", "header_base", "reward_address_used", "template_id", "template_expires_at_unix_ms", "mempool_generation"]
