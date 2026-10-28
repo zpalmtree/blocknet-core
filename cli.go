@@ -61,10 +61,13 @@ type CLI struct {
 
 // CLIConfig holds CLI configuration
 type CLIConfig struct {
-	WalletFile        string
-	DataDir           string
-	ListenAddrs       []string
-	SeedNodes         []string
+	WalletFile  string
+	DataDir     string
+	ListenAddrs []string
+	SeedNodes   []string
+	// ResolveSeedNodes, when set, supplies the seeds just before P2P dialing
+	// and replaces SeedNodes (see DaemonConfig.ResolveSeedNodes).
+	ResolveSeedNodes  func() []string
 	P2PWhitelistPeers []string
 	P2PMaxInbound     int // If >0, override default max inbound peers
 	P2PMaxOutbound    int // If >0, override default max outbound peers
@@ -167,6 +170,7 @@ func NewCLI(cfg CLIConfig) (*CLI, error) {
 		DataDir:           cfg.DataDir,
 		ListenAddrs:       cfg.ListenAddrs,
 		SeedNodes:         cfg.SeedNodes,
+		ResolveSeedNodes:  cfg.ResolveSeedNodes,
 		P2PWhitelistPeers: cfg.P2PWhitelistPeers,
 		P2PMaxInbound:     cfg.P2PMaxInbound,
 		P2PMaxOutbound:    cfg.P2PMaxOutbound,
@@ -178,6 +182,7 @@ func NewCLI(cfg CLIConfig) (*CLI, error) {
 
 	// Daemon mode: start without a wallet, user loads one via API
 	if cfg.DaemonMode {
+		logSinceProcessStart("new_daemon_start")
 		daemon, err := NewDaemon(daemonCfg, nil)
 		if err != nil {
 			cancel()
@@ -399,10 +404,12 @@ func (c *CLI) Run() error {
 	// while it connects — managers like bnt no longer time out and kill it.
 	// Clients can still see that sync is incomplete (height/syncing fields), so
 	// funds may not be fully visible until the chain catches up.
+	logSinceProcessStart("daemon_ready")
 	if c.api != nil {
 		if err := c.api.Start(c.apiAddr); err != nil {
 			return fmt.Errorf("failed to start API: %w", err)
 		}
+		logSinceProcessStart("api_listening")
 		if isInsecureAPIBindAddress(c.apiAddr) {
 			fmt.Printf("\n%s\n  API bind address %q is not loopback\n  Place behind trusted network boundaries or TLS\n", c.errorHead("Warning"), c.apiAddr)
 		}

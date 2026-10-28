@@ -218,7 +218,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 
 	// Set up identity rotation callback
 	identity.SetRotationCallback(func(newKey crypto.PrivKey, newID peer.ID) {
-		
+
 		node.mu.Lock()
 		node.pendingKey = newKey
 		node.pendingID = newID
@@ -297,6 +297,11 @@ func (n *Node) handleTxStream(s network.Stream) {
 func (n *Node) handleSyncStream(s network.Stream) {
 	defer s.Close()
 	// Sync protocol will be implemented with the sync handler
+}
+
+// SetSeedNodes replaces the bootstrap seed list. Call it before Start.
+func (n *Node) SetSeedNodes(seedAddrs []string) {
+	n.pex.setSeedNodes(seedAddrs)
 }
 
 // Start begins P2P operations (connecting to seeds, etc.)

@@ -162,9 +162,9 @@ type BanRecord struct {
 type PeerExchange struct {
 	mu sync.RWMutex
 
-	node       *Node
-	seedNodes  []peer.AddrInfo
-	knownPeers map[peer.ID]*PeerRecord
+	node         *Node
+	seedNodes    []peer.AddrInfo
+	knownPeers   map[peer.ID]*PeerRecord
 	banWhitelist map[peer.ID]struct{}
 
 	// Ban list
@@ -195,18 +195,7 @@ func newPeerIDSet(ids []string) (map[peer.ID]struct{}, error) {
 
 // NewPeerExchange creates a new peer exchange manager
 func NewPeerExchange(node *Node, seedAddrs []string, banWhitelist map[peer.ID]struct{}) *PeerExchange {
-	seeds := make([]peer.AddrInfo, 0, len(seedAddrs))
-	for _, addr := range seedAddrs {
-		ma, err := multiaddr.NewMultiaddr(addr)
-		if err != nil {
-			continue
-		}
-		pi, err := peer.AddrInfoFromP2pAddr(ma)
-		if err != nil {
-			continue
-		}
-		seeds = append(seeds, *pi)
-	}
+	seeds := parseSeedAddrs(seedAddrs)
 	if banWhitelist == nil {
 		banWhitelist = make(map[peer.ID]struct{})
 	}
@@ -219,6 +208,29 @@ func NewPeerExchange(node *Node, seedAddrs []string, banWhitelist map[peer.ID]st
 		bannedPeers:  make(map[peer.ID]*BanRecord),
 		lastExchange: make(map[peer.ID]time.Time),
 	}
+}
+
+func parseSeedAddrs(seedAddrs []string) []peer.AddrInfo {
+	seeds := make([]peer.AddrInfo, 0, len(seedAddrs))
+	for _, addr := range seedAddrs {
+		ma, err := multiaddr.NewMultiaddr(addr)
+		if err != nil {
+			continue
+		}
+		pi, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			continue
+		}
+		seeds = append(seeds, *pi)
+	}
+	return seeds
+}
+
+// setSeedNodes replaces the seed list. Only valid before Start.
+func (pex *PeerExchange) setSeedNodes(seedAddrs []string) {
+	pex.mu.Lock()
+	defer pex.mu.Unlock()
+	pex.seedNodes = parseSeedAddrs(seedAddrs)
 }
 
 func (pex *PeerExchange) isWhitelistedLocked(pid peer.ID) bool {

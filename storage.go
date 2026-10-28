@@ -74,7 +74,7 @@ func NewStorage(dataDir string) (*Storage, error) {
 
 	// Create buckets
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{bucketBlocks, bucketHeights, bucketOutputs, bucketKeyImages, bucketMeta} {
+		for _, bucket := range [][]byte{bucketBlocks, bucketHeights, bucketOutputs, bucketKeyImages, bucketMeta, bucketCanonicalRing} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -171,6 +171,9 @@ func (s *Storage) SetMainChainBlock(height uint64, hash [32]byte) error {
 	key := heightKey(height)
 
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateCanonicalRingIndexLocked(tx); err != nil {
+			return err
+		}
 		return tx.Bucket(bucketHeights).Put(key, hash[:])
 	})
 }
@@ -202,6 +205,9 @@ func (s *Storage) RemoveMainChainBlock(height uint64) error {
 	key := heightKey(height)
 
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateCanonicalRingIndexLocked(tx); err != nil {
+			return err
+		}
 		return tx.Bucket(bucketHeights).Delete(key)
 	})
 }
@@ -373,6 +379,9 @@ func (s *Storage) SetTip(hash [32]byte, height, work uint64) error {
 
 	return s.db.Update(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(bucketMeta)
+		if err := invalidateCanonicalRingIndexLocked(tx); err != nil {
+			return err
+		}
 		if err := meta.Put(metaKeyTip, hash[:]); err != nil {
 			return err
 		}
@@ -500,6 +509,14 @@ func (s *Storage) CommitBlock(commit *BlockCommit) error {
 
 			workBytes := make([]byte, 8)
 			binary.BigEndian.PutUint64(workBytes, commit.Work)
+
+			prevTip, _, prevTipFound, err := readTipMeta(meta)
+			if err != nil {
+				return fmt.Errorf("invalid tip metadata: %w", err)
+			}
+			if err := applyCanonicalRingChangesLocked(tx, prevTip, prevTipFound, nil, []*Block{commit.Block}, commit.Hash); err != nil {
+				return fmt.Errorf("update canonical ring index: %w", err)
+			}
 
 			if err := meta.Put(metaKeyTip, commit.Hash[:]); err != nil {
 				return err
@@ -725,6 +742,10 @@ func (s *Storage) CommitReorg(commit *ReorgCommit) error {
 					}
 				}
 			}
+		}
+
+		if err := applyCanonicalRingChangesLocked(tx, currentTip, true, commit.Disconnect, commit.Connect, commit.NewTip); err != nil {
+			return fmt.Errorf("update canonical ring index: %w", err)
 		}
 
 		// Update tip

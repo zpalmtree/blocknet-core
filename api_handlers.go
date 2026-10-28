@@ -1715,9 +1715,11 @@ func (s *APIServer) handleLoadWallet(w http.ResponseWriter, r *http.Request) {
 		walletPath = filepath.Join(filepath.Dir(s.cli.walletFile), base)
 	}
 
+	loadStartedAt := time.Now()
 	password := []byte(req.Password)
 	passHash := passwordHash(password)
 	wl, err := wallet.LoadWallet(walletPath, password, defaultWalletConfig())
+	decodedAt := time.Now()
 	wipeBytes(password)
 	if err != nil {
 		if status, msg, ok := walletLoadClientError(err); ok {
@@ -1743,6 +1745,7 @@ func (s *APIServer) handleLoadWallet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	rewoundAt := time.Now()
 	walletHeight, walletHash := wl.SyncedBlock()
 	if originalWalletHeight == chainHeight && walletHeight == chainHeight && chainHeight > 0 && !walletSyncHashKnown(walletHash) {
 		// Legacy wallets do not know which block hash they scanned at the tip.
@@ -1755,6 +1758,7 @@ func (s *APIServer) handleLoadWallet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	auditStartedAt := time.Now()
 	if issues := repairableWalletOutputIssues(auditWalletCanonicalOutputs(s.daemon.Chain(), wl.AllOutputs()), false); len(issues) > 0 {
 		removed := removeWalletOutputIssues(wl, issues)
 		if len(removed) > 0 {
@@ -1765,6 +1769,12 @@ func (s *APIServer) handleLoadWallet(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	auditedAt := time.Now()
+	log.Printf("[perf] wallet load outputs=%d decode=%s rewind=%s audit=%s total=%s",
+		len(wl.AllOutputs()), decodedAt.Sub(loadStartedAt).Round(time.Millisecond),
+		rewoundAt.Sub(decodedAt).Round(time.Millisecond), auditedAt.Sub(auditStartedAt).Round(time.Millisecond),
+		auditedAt.Sub(loadStartedAt).Round(time.Millisecond))
 
 	wl.SetInputFilter(func(out *wallet.OwnedOutput) bool {
 		ki, err := GenerateKeyImage(out.OneTimePrivKey)
@@ -2530,7 +2540,15 @@ func (s *APIServer) handleMiningStop(w http.ResponseWriter, r *http.Request) {
 // and submit back via POST /api/mining/submitblock.
 // GET /api/mining/blocktemplate
 func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) {
-	if s.wallet == nil {
+	// The wallet only supplies the default coinbase keys. A template paying an
+	// explicit ?address= is served without one, so a pool that passes its
+	// address gets work as soon as a restarted daemon's API is up instead of
+	// waiting for the (large) pool wallet to finish loading.
+	overrideAddr := sanitizeInput(r.URL.Query().Get("address"))
+	s.mu.RLock()
+	loadedWallet := s.wallet
+	s.mu.RUnlock()
+	if loadedWallet == nil && overrideAddr == "" {
 		writeError(w, http.StatusServiceUnavailable, "no wallet loaded")
 		return
 	}
@@ -2547,18 +2565,21 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	reward := GetBlockReward(tp.Height)
 
 	// Optionally override the coinbase destination (pool/dev-fee switching).
-	recipientSpendPub := s.wallet.SpendPubKey()
-	recipientViewPub := s.wallet.ViewPubKey()
-	rewardAddrUsed := s.wallet.Address()
-	if addr := sanitizeInput(r.URL.Query().Get("address")); addr != "" {
-		spendPub, viewPub, err := parseValidatedAddress(addr)
+	var recipientSpendPub, recipientViewPub [32]byte
+	var rewardAddrUsed string
+	if overrideAddr != "" {
+		spendPub, viewPub, err := parseValidatedAddress(overrideAddr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid address")
 			return
 		}
 		recipientSpendPub = spendPub
 		recipientViewPub = viewPub
-		rewardAddrUsed = addr
+		rewardAddrUsed = overrideAddr
+	} else {
+		recipientSpendPub = loadedWallet.SpendPubKey()
+		recipientViewPub = loadedWallet.ViewPubKey()
+		rewardAddrUsed = loadedWallet.Address()
 	}
 
 	// Create coinbase paying to the selected reward address

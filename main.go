@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -210,12 +211,23 @@ func main() {
 		peerIDPort = TestnetPeerIDPort
 		fallbackSeeds = DefaultTestnetSeedNodes
 	}
-	seedNodes := ResolveSeedNodes(DefaultSeedHosts, p2pPort, peerIDPort)
-	if len(seedNodes) == 0 {
-		seedNodes = fallbackSeeds
-	}
-	if len(flag.Args()) > 0 {
-		seedNodes = append(seedNodes, flag.Args()...)
+	// Seed lookups wait up to 3s on the slowest host, so they run alongside
+	// chain loading and are only awaited before P2P dialing, after the API is
+	// already serving.
+	extraSeeds := flag.Args()
+	seedsResolved := make(chan []string, 1)
+	go func() {
+		seedNodes := ResolveSeedNodes(DefaultSeedHosts, p2pPort, peerIDPort)
+		if len(seedNodes) == 0 {
+			seedNodes = fallbackSeeds
+		}
+		seedsResolved <- append(seedNodes, extraSeeds...)
+	}()
+	var resolveSeedsOnce sync.Once
+	var seedNodes []string
+	resolveSeeds := func() []string {
+		resolveSeedsOnce.Do(func() { seedNodes = <-seedsResolved })
+		return seedNodes
 	}
 
 	whitelistPeers := []string(p2pWhitelistPeers)
@@ -245,7 +257,7 @@ func main() {
 		WalletFile:        *walletFile,
 		DataDir:           *dataDir,
 		ListenAddrs:       []string{*listen},
-		SeedNodes:         seedNodes,
+		ResolveSeedNodes:  resolveSeeds,
 		P2PWhitelistPeers: whitelistPeers,
 		P2PMaxInbound:     *p2pMaxInbound,
 		P2PMaxOutbound:    *p2pMaxOutbound,
