@@ -205,11 +205,12 @@ func TestWalletFeedExternalSignerRoundTrip(t *testing.T) {
 	}
 	var kis struct {
 		KeyImages []struct {
-			Spent     bool `json:"spent"`
-			InMempool bool `json:"in_mempool"`
+			Spent     bool    `json:"spent"`
+			Height    *uint64 `json:"height"`
+			InMempool bool    `json:"in_mempool"`
 		} `json:"key_images"`
 	}
-	if feedPost(t, mux, "/api/wallet-feed/key-images", map[string][]string{"key_images": {ki}}, &kis); len(kis.KeyImages) != 1 || kis.KeyImages[0].Spent || !kis.KeyImages[0].InMempool {
+	if feedPost(t, mux, "/api/wallet-feed/key-images", map[string][]string{"key_images": {ki}}, &kis); len(kis.KeyImages) != 1 || kis.KeyImages[0].Spent || kis.KeyImages[0].Height != nil || !kis.KeyImages[0].InMempool {
 		t.Fatalf("key image status before inclusion: %+v", kis)
 	}
 
@@ -219,8 +220,9 @@ func TestWalletFeedExternalSignerRoundTrip(t *testing.T) {
 	if code := feedPost(t, mux, "/api/wallet-feed/submit", map[string]string{"tx": txHex}, &sub); code != 200 || sub["status"] != "canonical" {
 		t.Fatalf("submit after inclusion: %d %v", code, sub)
 	}
-	if feedPost(t, mux, "/api/wallet-feed/key-images", map[string][]string{"key_images": {ki}}, &kis); !kis.KeyImages[0].Spent {
-		t.Fatalf("key image not spent after inclusion: %+v", kis)
+	if feedPost(t, mux, "/api/wallet-feed/key-images", map[string][]string{"key_images": {ki}}, &kis); !kis.KeyImages[0].Spent ||
+		kis.KeyImages[0].Height == nil || *kis.KeyImages[0].Height != chain.Height() {
+		t.Fatalf("key image not spent at the mined height %d after inclusion: %+v", chain.Height(), kis)
 	}
 
 	// Rejections.

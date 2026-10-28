@@ -107,9 +107,10 @@ func (s *APIServer) handleWalletFeedKeyImages(w http.ResponseWriter, r *http.Req
 		return
 	}
 	type status struct {
-		KeyImage  string `json:"key_image"`
-		Spent     bool   `json:"spent"`
-		InMempool bool   `json:"in_mempool"`
+		KeyImage  string  `json:"key_image"`
+		Spent     bool    `json:"spent"`
+		Height    *uint64 `json:"height,omitempty"` // block that spent it, when spent
+		InMempool bool    `json:"in_mempool"`
 	}
 	out := make([]status, len(req.KeyImages))
 	for i, raw := range req.KeyImages {
@@ -118,7 +119,10 @@ func (s *APIServer) handleWalletFeedKeyImages(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusBadRequest, "key images must be 64 hex characters")
 			return
 		}
-		out[i] = status{KeyImage: raw, Spent: s.daemon.Chain().IsKeyImageSpent(ki), InMempool: s.daemon.Mempool().HasKeyImage(ki)}
+		out[i] = status{KeyImage: raw, InMempool: s.daemon.Mempool().HasKeyImage(ki)}
+		if height, spent := s.daemon.Chain().KeyImageSpentHeight(ki); spent {
+			out[i].Spent, out[i].Height = true, &height
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"key_images": out})
 }

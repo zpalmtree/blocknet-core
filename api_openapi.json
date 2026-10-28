@@ -206,6 +206,10 @@
                           "spent": {
                             "type": "boolean"
                           },
+                          "height": {
+                            "type": "integer",
+                            "description": "Height of the block that spent it; present only when spent"
+                          },
                           "in_mempool": {
                             "type": "boolean"
                           }
