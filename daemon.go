@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"blocknet/p2p"
@@ -86,6 +87,12 @@ type Daemon struct {
 
 	// Supplies seed nodes right before P2P dialing (DaemonConfig.ResolveSeedNodes).
 	resolveSeedNodes func() []string
+
+	// Startup tip-freshness gate for mining templates (templateTipChecked).
+	syncStartedAt  atomic.Pointer[time.Time] // set when Start launches sync
+	tipGateOpen    atomic.Bool
+	tipGateNow     func() time.Time // nil means time.Now
+	peerTipChecked func() bool      // nil means syncMgr.PeerTipChecked
 }
 
 const (
@@ -632,6 +639,8 @@ func (d *Daemon) Start() error {
 	}
 
 	// Start sync manager
+	syncStartedAt := time.Now()
+	d.syncStartedAt.Store(&syncStartedAt)
 	d.syncMgr.Start(d.ctx)
 
 	// Start explorer if configured
@@ -1304,6 +1313,37 @@ func (d *Daemon) Mempool() *Mempool { return d.mempool }
 func (d *Daemon) Node() *p2p.Node   { return d.node }
 func (d *Daemon) Miner() *Miner     { return d.miner }
 func (d *Daemon) TriggerSync()      { d.syncMgr.TriggerSync() }
+
+// templateTipChecked reports whether mining templates may be served yet. The
+// API comes up before the node has heard from any peer, and a template built
+// then may extend a tip the network has already passed: a block found on it is
+// accepted locally, announced, and orphaned once the node syncs. The gate
+// opens on the first comparison of the local tip with a peer's chain status,
+// or blockTemplatePeerTipWait after sync starts, and then stays open; later
+// sync lag is handled by IsSyncingFarBehind.
+func (d *Daemon) templateTipChecked() bool {
+	if d.tipGateOpen.Load() {
+		return true
+	}
+	checked := d.peerTipChecked
+	if checked == nil {
+		checked = d.syncMgr.PeerTipChecked
+	}
+	open := checked()
+	if !open {
+		if started := d.syncStartedAt.Load(); started != nil {
+			now := d.tipGateNow
+			if now == nil {
+				now = time.Now
+			}
+			open = now().Sub(*started) >= blockTemplatePeerTipWait
+		}
+	}
+	if open {
+		d.tipGateOpen.Store(true)
+	}
+	return open
+}
 
 // IsMining returns whether the miner is running
 func (d *Daemon) IsMining() bool {
