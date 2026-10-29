@@ -14,7 +14,7 @@ match upstream.
 
 ## Remaining patch stack
 
-These five code commits are replayed directly on that upstream base:
+These code commits are replayed directly on that upstream base:
 
 | Commit | Purpose | Upstream status |
 | --- | --- | --- |
@@ -23,6 +23,8 @@ These five code commits are replayed directly on that upstream base:
 | `c8fc312` | External-wallet feeds, signed-transaction submission, encrypted export and pool send handling | Pool-specific |
 | `5f75137` | Bounded canonical block-hash batch API and endpoint test | Pool-specific |
 | `98b8cec` | Background PoW memory warm-up and verification benchmark helper | Pool-specific |
+| `ede0268` | Keep block templates within the peer block-announcement size | Candidate for upstream with a larger announcement limit |
+| `71be1be` | Report syncing only when behind the sync target, plus `sync_in_progress` and `blocks_behind` | Candidate for upstream |
 
 ## Reconciliation
 
