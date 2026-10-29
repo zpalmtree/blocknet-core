@@ -2926,6 +2926,17 @@ func (c *Chain) HasBlock(hash [32]byte) bool {
 // IsKeyImageSpent checks if a key image has been used (double-spend check)
 // KeyImageSpentHeight reports whether a key image is spent on the canonical
 // chain and, if so, the height of the block that spent it.
+func (c *Chain) KeyImageSpentHeight(keyImage [32]byte) (uint64, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if height, exists := c.keyImages[keyImage]; exists {
+		return height, true
+	}
+	spent, height := c.storage.IsKeyImageSpent(keyImage)
+	return height, spent
+}
+
 func (c *Chain) IsKeyImageSpent(keyImage [32]byte) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

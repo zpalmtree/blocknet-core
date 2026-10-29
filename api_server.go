@@ -20,6 +20,13 @@ import (
 const maxRequestBodyBytes int64 = 1 << 20 // 1MB
 
 const (
+	apiReadTimeout = 10 * time.Second
+	// Wallet sends can spend tens of seconds constructing/signing many-input transactions.
+	apiWriteTimeout = 5 * time.Minute
+	apiIdleTimeout  = 60 * time.Second
+)
+
+const (
 	unlockFailureBaseDelay  = 250 * time.Millisecond
 	unlockFailureMaxDelay   = 5 * time.Second
 	unlockFailureLockout    = 30 * time.Second
@@ -50,10 +57,9 @@ type APIServer struct {
 	submitBlockLimiter *perIPLimiter
 	submitBlockSem     chan struct{}
 
-	// Route-scoped abuse controls for expensive tx construction/signing.
-	sendLimiter *perIPLimiter
-	sendSem     chan struct{}
-	sendIdem    *idempotencyCache
+	// Route-scoped concurrency controls for expensive tx construction/signing.
+	sendSem  chan struct{}
+	sendIdem *idempotencyCache
 
 	// Route-scoped abuse controls for stateless signature verification.
 	verifyLimiter *perIPLimiter
@@ -229,7 +235,6 @@ func NewAPIServer(daemon *Daemon, w *wallet.Wallet, scanner *wallet.Scanner, dat
 		dataDir:            dataDir,
 		submitBlockLimiter: newPerIPLimiter(rate.Limit(2), 4, 10*time.Minute),
 		submitBlockSem:     make(chan struct{}, 2),
-		sendLimiter:        newPerIPLimiter(rate.Limit(0.5), 2, 10*time.Minute), // ~1 req / 2s, burst 2
 		sendSem:            make(chan struct{}, 1),
 		sendIdem:           newIdempotencyCache(30*24*time.Hour, 4096, filepath.Join(dataDir, "send-idempotency.json")),
 		verifyLimiter:      newPerIPLimiter(rate.Limit(5), 10, 10*time.Minute),
@@ -469,9 +474,9 @@ func (s *APIServer) Start(addr string) error {
 	s.server = &http.Server{
 		Addr:         addr,
 		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  apiReadTimeout,
+		WriteTimeout: apiWriteTimeout,
+		IdleTimeout:  apiIdleTimeout,
 	}
 
 	ln, err := net.Listen("tcp", addr)
