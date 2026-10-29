@@ -30,6 +30,16 @@ fn pow_kernel() -> &'static FixedArgon2id {
     })
 }
 
+/// Fault in one arena using the same bounded cache as block verification.
+#[unsafe(no_mangle)]
+pub extern "C" fn blocknet_pow_warm() -> i32 {
+    let pool = POW_MEMORY.get_or_init(|| MemoryPool::new(pow_kernel().block_count()));
+    match pool.warm() {
+        Ok(()) => 0,
+        Err(()) => -2,
+    }
+}
+
 /// Enable or disable retention of idle PoW scratch memory. Enabled by default.
 #[unsafe(no_mangle)]
 pub extern "C" fn blocknet_pow_set_cache_enabled(enabled: u8) -> i32 {
@@ -166,6 +176,7 @@ mod tests {
         let reference = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let header = [0x5au8; 80];
         for nonce in [0u64, u64::MAX, 0] {
+            assert_eq!(blocknet_pow_warm(), 0);
             let mut actual = [0u8; 32];
             let mut expected = [0u8; 32];
             assert_eq!(

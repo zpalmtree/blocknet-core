@@ -417,6 +417,10 @@ int32_t blocknet_pow_hash(
 // Disabling releases the cached arena; active hashes still require 2 GiB each.
 int32_t blocknet_pow_set_cache_enabled(uint8_t enabled);
 
+// Allocate and fault in one PoW arena ahead of time so the first block
+// verified after startup runs at full speed. Returns 0 on success.
+int32_t blocknet_pow_warm(void);
+
 // Check if hash meets difficulty target
 // Returns 1 if hash < target (valid), 0 otherwise
 int32_t blocknet_pow_check_target(
