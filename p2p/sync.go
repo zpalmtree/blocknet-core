@@ -1456,18 +1456,27 @@ func (sm *SyncManager) IsSyncing() bool {
 // only need to avoid acting on a genuinely stale chain (such as mining
 // template serving) should use this instead of IsSyncing.
 func (sm *SyncManager) IsSyncingFarBehind(tolerance uint64) bool {
+	return sm.BlocksBehind() > tolerance
+}
+
+// BlocksBehind reports how many blocks an active sync run's target is ahead
+// of the local chain tip, or 0 when no run is active or the tip is current.
+func (sm *SyncManager) BlocksBehind() uint64 {
 	sm.mu.RLock()
 	syncing := sm.syncing
 	target := sm.syncTarget
 	sm.mu.RUnlock()
 	if !syncing {
-		return false
+		return 0
 	}
 	// Compare against the live chain tip rather than syncProgress: the
 	// overlap re-download makes syncProgress regress below the tip, while
 	// the tip itself only moves forward.
 	height := sm.getStatus().Height
-	return target > height && target-height > tolerance
+	if target <= height {
+		return 0
+	}
+	return target - height
 }
 
 // PeerTipChecked reports whether a sync check has compared the local chain
