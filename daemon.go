@@ -822,10 +822,11 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		d.latency.Observe(latencyFamilyPeerBlock, l.lane, l.elapsed)
 	}
 	log.Printf(
-		"[perf] peer block height=%d hash=%x from=%s txs=%d decode=%s slot_wait=%s lock_wait=%s process=%s (validate=%s pow=%s reorg=%s) mempool=%s checkpoint=%s relay=%s notify=%s total=%s",
+		"[perf] peer block height=%d hash=%x from=%s txs=%d decode=%s slot_wait=%s lock_wait=%s process=%s (preverify=%s chain_lock=%s validate=%s pow=%s reorg=%s) mempool=%s checkpoint=%s relay=%s notify=%s total=%s",
 		block.Header.Height, hash[:8], from.String()[:8], len(block.Transactions),
 		decodedAt.Sub(receivedAt), slotAt.Sub(decodedAt), lockedAt.Sub(slotAt),
-		processTimings.Total, processTimings.Validate, processTimings.Detail.PoW, processTimings.Reorg,
+		processTimings.Total, processTimings.Preverify, processTimings.LockWait,
+		processTimings.Validate, processTimings.Detail.PoW, processTimings.Reorg,
 		mempoolAt.Sub(acceptedAt), checkpointAt.Sub(mempoolAt), relayAt.Sub(checkpointAt),
 		doneAt.Sub(relayAt), doneAt.Sub(receivedAt),
 	)
@@ -1525,9 +1526,10 @@ func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
 		d.latency.Observe(latencyFamilySubmitBlock, l.lane, l.elapsed)
 	}
 	log.Printf(
-		"[perf] submitted block height=%d hash=%x main=%t txs=%d bytes=%d lock_wait=%s stale_check=%s process=%s (validate=%s pow=%s tx=%s reorg=%s commit=%s) mempool=%s checkpoint=%s marshal=%s broadcast=%s notify=%s total=%s",
+		"[perf] submitted block height=%d hash=%x main=%t txs=%d bytes=%d lock_wait=%s stale_check=%s process=%s (preverify=%s chain_lock=%s validate=%s pow=%s tx=%s reorg=%s commit=%s) mempool=%s checkpoint=%s marshal=%s broadcast=%s notify=%s total=%s",
 		block.Header.Height, hash[:8], isMainChain, len(block.Transactions), len(blockData),
-		t.LockWait, t.StaleCheck, processTimings.Total, processTimings.Validate,
+		t.LockWait, t.StaleCheck, processTimings.Total, processTimings.Preverify,
+		processTimings.LockWait, processTimings.Validate,
 		processTimings.Detail.PoW, processTimings.Detail.TxValidation, processTimings.Reorg,
 		processTimings.Commit, t.MempoolUpdate, t.CheckpointSave, t.Marshal, t.Broadcast,
 		t.Notify, t.Total,
