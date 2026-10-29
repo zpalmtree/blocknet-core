@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"slices"
 	"strconv"
+
+	"blocknet/p2p"
 )
 
 var byteDecimal = func() [256][4]byte {
@@ -178,4 +180,29 @@ func marshalBlockJSON(b *Block) []byte {
 		dst = append(dst, ']')
 	}
 	return append(dst, '}')
+}
+
+// blockTemplateJSONBudget keeps a template's JSON encoding, the form new
+// blocks are announced to peers in, under the peer block-announcement limit,
+// so a block found on it can be pushed instead of waiting for peers to sync
+// it. The headroom covers header fields that change after the template is
+// built.
+const blockTemplateJSONBudget = p2p.MaxBlockStreamPayloadSize - 64*1024
+
+// trimTransactionsToJSONBudget drops transactions from the end of a
+// fee-ordered selection until a block with this header, coinbase and the
+// remaining transactions encodes within budget bytes of JSON.
+func trimTransactionsToJSONBudget(header BlockHeader, coinbase *Transaction, txs []*Transaction, budget int) []*Transaction {
+	all := make([]*Transaction, 0, len(txs)+1)
+	all = append(all, coinbase)
+	all = append(all, txs...)
+	size := len(marshalBlockJSON(&Block{Header: header, Transactions: all}))
+	var scratch []byte
+	for len(txs) > 0 && size > budget {
+		last := txs[len(txs)-1]
+		scratch = appendTransactionJSON(scratch[:0], last)
+		size -= len(scratch) + 1 // the transaction and its separating comma
+		txs = txs[:len(txs)-1]
+	}
+	return txs
 }
