@@ -1858,7 +1858,9 @@ func (c *Chain) ProcessBlockTimed(block *Block) (accepted bool, isMainChain bool
 		preverifyDuration = time.Since(preverifyStartedAt)
 		preverified = true
 	}
+	lockStartedAt := time.Now()
 	c.mu.Lock()
+	lockWaitDuration := time.Since(lockStartedAt)
 	defer c.mu.Unlock()
 
 	currentStage := "validate"
@@ -1881,6 +1883,7 @@ func (c *Chain) ProcessBlockTimed(block *Block) (accepted bool, isMainChain bool
 		total := time.Since(startedAt)
 		timings = processBlockTimings{
 			Preverify: preverifyDuration,
+			LockWait:  lockWaitDuration,
 			Validate:  validateDuration,
 			Reorg:     reorgDuration,
 			Commit:    commitDuration,
