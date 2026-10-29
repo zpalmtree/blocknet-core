@@ -78,6 +78,8 @@ const (
 	// syncMinDialedQuorum is how many dialed peers must answer before they can mark
 	// the node as behind: one or two can be wrong, or be the attacker.
 	syncMinDialedQuorum = 3
+	// syncProtectTag marks peers an active sync run downloads from.
+	syncProtectTag = "sync"
 )
 
 const (
@@ -1041,6 +1043,8 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 	sm.downloadBuffer = make(map[uint64]DownloadedBlock) // Reset buffer
 	sm.mu.Unlock()
 
+	defer sm.protectSyncPeers(peers)()
+
 	defer func() {
 		sm.mu.Lock()
 		sm.syncing = false
@@ -1349,6 +1353,24 @@ func (sm *SyncManager) coolDownPeer(pid peer.ID, now time.Time) {
 		sm.claimCooldowns = make(map[peer.ID]time.Time)
 	}
 	sm.claimCooldowns[pid] = now.Add(syncClaimCooldown)
+}
+
+// protectSyncPeers keeps the connection manager from trimming the peers a
+// sync run downloads from (losing one mid-run stalls the run until it gives
+// up) and returns the function that releases them.
+func (sm *SyncManager) protectSyncPeers(peers []PeerStatus) func() {
+	if sm.node == nil || sm.node.host == nil {
+		return func() {}
+	}
+	connMgr := sm.node.host.ConnManager()
+	for _, ps := range peers {
+		connMgr.Protect(ps.Peer, syncProtectTag)
+	}
+	return func() {
+		for _, ps := range peers {
+			connMgr.Unprotect(ps.Peer, syncProtectTag)
+		}
+	}
 }
 
 func (sm *SyncManager) observeFetch(d time.Duration) {
@@ -1882,9 +1904,7 @@ func (sm *SyncManager) IsSyncing() bool {
 // small overlap window and the mempool, holding IsSyncing true for many
 // seconds even though the local tip is current the whole time. Callers that
 // only need to avoid acting on a genuinely stale chain (such as mining
-// template serving) should use this instead of IsSyncing. A run following a tip
-// only a minority of peers advertise doesn't count until a block above the
-// local tip arrives: one peer's status must not stop template serving.
+// template serving) should use this instead of IsSyncing.
 func (sm *SyncManager) IsSyncingFarBehind(tolerance uint64) bool {
 	return sm.BlocksBehind() > tolerance
 }
