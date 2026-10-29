@@ -164,13 +164,10 @@ func TestWalletAPIHandlesRepeatedOneTimeKey(t *testing.T) {
 	const token = "test-token"
 	handler := maxBodySize(authMiddleware(token, mux), maxRequestBodyBytes)
 
-	// Sends are rate limited per client, so each request gets its own address.
-	requests := 0
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		requests++
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		req.RemoteAddr = fmt.Sprintf("198.51.100.%d:1234", requests)
+		req.RemoteAddr = "198.51.100.40:1234"
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
