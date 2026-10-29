@@ -73,6 +73,23 @@ impl MemoryPool {
         Ok(())
     }
 
+    pub(crate) fn warm(&self) -> Result<(), ()> {
+        {
+            let idle = self.idle.lock().map_err(|_| ())?;
+            if !idle.enabled || idle.memory.is_some() {
+                return Ok(());
+            }
+        }
+        let mut memory = self.checkout()?;
+        // Each block is 1 KiB. Touch every 4 KiB; the exclusive guard keeps
+        // this separate from active hashes, and surplus arenas are still freed.
+        for block in memory.as_mut().iter_mut().step_by(4) {
+            // SAFETY: a valid, exclusively borrowed word in this arena.
+            unsafe { std::ptr::write_volatile(&mut block.as_mut()[0], 0) };
+        }
+        Ok(())
+    }
+
     pub(crate) fn checkout(&self) -> Result<MemoryGuard<'_>, ()> {
         let cached = {
             let mut idle = self.idle.lock().map_err(|_| ())?;
@@ -436,6 +453,39 @@ mod tests {
                 assert_eq!(pool.idle.lock().unwrap().memory.is_some(), enabled);
             }
         }
+    }
+
+    #[test]
+    fn warming_reuses_the_cached_arena_and_preserves_active_memory() {
+        let pool = MemoryPool::new(32);
+        pool.warm().unwrap();
+        let mut active = pool.checkout().unwrap();
+        let pointer = active.as_mut().as_ptr();
+        active.as_mut()[0].as_mut()[0] = 42;
+        pool.warm().unwrap();
+        assert_eq!(active.as_mut()[0].as_ref()[0], 42);
+        let cached_pointer = pool
+            .idle
+            .lock()
+            .unwrap()
+            .memory
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .as_ptr();
+        assert_ne!(pointer, cached_pointer);
+        pool.warm().unwrap();
+        drop(active);
+        assert_eq!(pool.checkout().unwrap().as_mut().as_ptr(), cached_pointer);
+    }
+
+    #[test]
+    fn warming_disabled_cache_skips_allocation() {
+        // This size cannot be allocated; a disabled warm-up must still succeed.
+        let pool = MemoryPool::new(usize::MAX);
+        pool.set_cache_enabled(false).unwrap();
+        pool.warm().unwrap();
+        assert!(pool.idle.lock().unwrap().memory.is_none());
     }
 
     #[test]
