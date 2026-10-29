@@ -42,8 +42,16 @@ The PRs contain no external-wallet feed/export APIs or pool send-policy changes.
 Retain the corresponding pool patches until these changes are accepted upstream,
 then reconcile by content on the next upstream update.
 
-The unrelated explorer layout patch was reverted in `c8fbba9`. The PoW kernel
-and hugepage changes have not been proposed in these PRs.
+The unrelated explorer layout patch was reverted in `c8fbba9`.
+
+[#62: reusable PoW memory and Linux huge pages](https://github.com/blocknetprivacy/core/pull/62)
+is a separate, independent memory-management patch using upstream's existing
+RustCrypto Argon2 implementation. It retains at most one idle 2 GiB buffer.
+It passed 27 Rust tests, explicit production-size reference comparisons, the
+full Go race suite and `go vet`. The benchmark harness and raw results are
+included in that PR; local evidence is in `experiments/pow-upstream-20261029`.
+Adopting the optimized kernel is a [separate proposal](https://github.com/blocknetprivacy/core/pull/62#issuecomment-6488580804),
+pending agreement on package ownership, distribution and cross-CPU verification.
 
 ## Verification
 
