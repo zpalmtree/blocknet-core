@@ -182,12 +182,16 @@ func marshalBlockJSON(b *Block) []byte {
 	return append(dst, '}')
 }
 
+// legacyBlockAnnouncementLimit is the largest new-block announcement that
+// nodes from before the 6 MiB limit accept.
+const legacyBlockAnnouncementLimit = 2 * 1024 * 1024
+
 // blockTemplateJSONBudget keeps a template's JSON encoding, the form new
-// blocks are announced to peers in, under the peer block-announcement limit,
-// so a block found on it can be pushed instead of waiting for peers to sync
-// it. The headroom covers header fields that change after the template is
-// built.
-const blockTemplateJSONBudget = p2p.MaxBlockStreamPayloadSize - 64*1024
+// blocks are announced to peers in, under the announcement limit that most
+// of the network still enforces, so a block found on it can be pushed
+// instead of waiting for peers to sync it. The headroom covers header fields
+// that change after the template is built.
+const blockTemplateJSONBudget = min(legacyBlockAnnouncementLimit, p2p.MaxBlockStreamPayloadSize) - 64*1024
 
 // trimTransactionsToJSONBudget drops transactions from the end of a
 // fee-ordered selection until a block with this header, coinbase and the
