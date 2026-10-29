@@ -139,7 +139,7 @@ func TestHandleRenewBlockTemplate_RefusesTemplateAfterCanonicalTipChanges(t *tes
 	newTip := makeOutputOnlyTestBlock(tip.Height, tip.PrevHash, genesis.Header.Timestamp+BlockIntervalSec, nil)
 	commitMainChainBlockForTest(t, chain, storage, newTip, chain.TotalWork()+MinDifficulty)
 	chain.mu.Lock()
-	chain.publishTipLocked()
+	chain.updateTipSnapshotLocked()
 	chain.mu.Unlock()
 
 	now = now.Add(10 * time.Second)
@@ -321,7 +321,7 @@ func TestRememberMiningTemplateLease_TipChangePrunesOldCapacity(t *testing.T) {
 	newTipBlock := makeOutputOnlyTestBlock(oldTip.Height, oldTip.PrevHash, genesis.Header.Timestamp+BlockIntervalSec, nil)
 	commitMainChainBlockForTest(t, chain, storage, newTipBlock, chain.TotalWork()+MinDifficulty)
 	chain.mu.Lock()
-	chain.publishTipLocked()
+	chain.updateTipSnapshotLocked()
 	chain.mu.Unlock()
 
 	newTip := chain.TemplateParams()
@@ -374,7 +374,7 @@ func TestRememberMiningTemplateLease_RejectsOldInflightTemplateWithoutPurgingNew
 	tipBBlock := makeOutputOnlyTestBlock(tipA.Height, tipA.PrevHash, genesis.Header.Timestamp+BlockIntervalSec, nil)
 	commitMainChainBlockForTest(t, chain, storage, tipBBlock, chain.TotalWork()+MinDifficulty)
 	chain.mu.Lock()
-	chain.publishTipLocked()
+	chain.updateTipSnapshotLocked()
 	chain.mu.Unlock()
 
 	// Request B completes first and advertises leases for the new canonical tip.

@@ -64,13 +64,27 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if block == nil {
 				continue
 			}
-			if err := s.sendSSE(w, flusher, "new_block", map[string]any{
+			hash := block.Hash()
+			payload := map[string]any{
 				"height":    block.Header.Height,
-				"hash":      fmt.Sprintf("%x", block.Hash()),
+				"hash":      fmt.Sprintf("%x", hash),
 				"timestamp": block.Header.Timestamp,
 				"tx_count":  len(block.Transactions),
-			}); err != nil {
+			}
+			// Wall-clock acceptance times let subscribers measure tip
+			// delivery latency end to end.
+			tip, haveTip := s.daemon.TipEvent(hash)
+			if haveTip {
+				payload["source"] = tip.Source
+				payload["received_at_unix_us"] = tip.ReceivedAt.UnixMicro()
+				payload["accepted_at_unix_us"] = tip.AcceptedAt.UnixMicro()
+			}
+			if err := s.sendSSE(w, flusher, "new_block", payload); err != nil {
 				return
+			}
+			if haveTip && !tip.NotifiedAt.IsZero() {
+				s.daemon.ObserveLatency(latencyFamilyEvents, "new_block_write", time.Since(tip.NotifiedAt))
+				s.daemon.ObserveLatency(latencyFamilyEvents, "new_block_accepted_to_write", time.Since(tip.AcceptedAt))
 			}
 
 		case block := <-minedCh:

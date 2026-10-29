@@ -53,6 +53,11 @@ type Daemon struct {
 	minedSubs   []chan *Block
 	minedSubsMu sync.Mutex
 
+	// Block-path latency histograms (GET /api/perf/latency) and recent tip
+	// acceptance times carried on new_block SSE events.
+	latency   latencyRecorder
+	tipEvents tipEventLog
+
 	// Explorer
 	explorerAddr string
 	explorerMu   sync.Mutex
@@ -62,8 +67,8 @@ type Daemon struct {
 	// Checkpoints
 	saveCheckpoints        atomic.Bool
 	checkpointsFile        string
+	checkpointMu           sync.Mutex // serializes API and automatic checkpoint publication
 	lastCheckpointWritten  uint64
-	checkpointMu           sync.Mutex
 	checkpointsInitialized bool
 
 	// Self-heal info (set during NewDaemon if chain was truncated)
@@ -484,6 +489,7 @@ func NewDaemon(cfg DaemonConfig, stealthKeys *StealthKeys) (*Daemon, error) {
 			d.miner.NotifyNewBlock()
 			var block Block
 			if err := json.Unmarshal(data, &block); err == nil {
+				d.recordTipAccepted(block.Hash(), tipSourceSync, time.Time{}, time.Now())
 				d.notifyBlock(&block)
 			}
 		},
@@ -534,7 +540,38 @@ func (d *Daemon) UnsubscribeBlocks(ch chan *Block) {
 }
 
 // notifyBlock sends block to all subscribers
+// recordTipAccepted remembers when a main-chain block was received and
+// accepted so new_block SSE events can report it. A zero receivedAt means the
+// receive time is unknown (e.g. blocks fetched by the sync manager).
+func (d *Daemon) recordTipAccepted(hash [32]byte, source string, receivedAt, acceptedAt time.Time) {
+	if receivedAt.IsZero() {
+		receivedAt = acceptedAt
+	}
+	d.tipEvents.record(tipEvent{
+		Hash:       hash,
+		Source:     source,
+		ReceivedAt: receivedAt,
+		AcceptedAt: acceptedAt,
+	})
+}
+
+// TipEvent returns the recorded acceptance times for a recent main-chain block.
+func (d *Daemon) TipEvent(hash [32]byte) (tipEvent, bool) {
+	return d.tipEvents.lookup(hash)
+}
+
+// LatencySnapshot returns the block-path latency histograms.
+func (d *Daemon) LatencySnapshot() map[string]map[string]latencyHistogramSnapshot {
+	return d.latency.Snapshot()
+}
+
+// ObserveLatency records one latency sample.
+func (d *Daemon) ObserveLatency(family, lane string, elapsed time.Duration) {
+	d.latency.Observe(family, lane, elapsed)
+}
+
 func (d *Daemon) notifyBlock(block *Block) {
+	d.tipEvents.markNotified(block.Hash(), time.Now())
 	d.blockSubsMu.Lock()
 	defer d.blockSubsMu.Unlock()
 	for _, ch := range d.blockSubs {
@@ -679,6 +716,7 @@ func (d *Daemon) handleMinedBlock(block *Block) {
 
 // handleBlock processes a block from a peer
 func (d *Daemon) handleBlock(from peer.ID, data []byte) {
+	receivedAt := time.Now()
 	var block Block
 	if err := json.Unmarshal(data, &block); err != nil {
 		d.penalizeInvalidGossipPeer(from, p2p.ScorePenaltyMisbehave, "malformed block payload")
@@ -688,16 +726,19 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		d.penalizeInvalidGossipPeer(from, p2p.ScorePenaltyMisbehave, fmt.Sprintf("block prefilter failed: %v", err))
 		return
 	}
+	decodedAt := time.Now()
 	if err := d.acquireGossipBlockValidationSlot(from); err != nil {
 		d.penalizeInvalidGossipPeer(from, p2p.ScorePenaltyMisbehave, err.Error())
 		return
 	}
 	defer d.releaseGossipBlockValidationSlot()
+	slotAt := time.Now()
 
 	d.mu.Lock()
+	lockedAt := time.Now()
 
 	prevBest := d.chain.BestHash()
-	accepted, isMainChain, err := d.chain.ProcessBlock(&block)
+	accepted, isMainChain, processTimings, err := d.chain.ProcessBlockTimed(&block)
 	if err != nil || !accepted {
 		d.mu.Unlock()
 		if err != nil {
@@ -706,19 +747,54 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		}
 		return
 	}
+	d.latency.observeProcessBlock(tipSourceGossip, processTimings)
 
 	if !isMainChain {
 		d.mu.Unlock()
 		return
 	}
+	acceptedAt := time.Now()
 
 	d.updateMempoolForAcceptedMainChain(&block, prevBest)
 	d.mu.Unlock()
+	mempoolAt := time.Now()
 
+	hash := block.Hash()
+	d.recordTipAccepted(hash, tipSourceGossip, receivedAt, acceptedAt)
 	d.maybeSaveCheckpoints()
+	checkpointAt := time.Now()
 	d.node.RelayBlock(from, data)
+	relayAt := time.Now()
 	d.notifyBlock(&block)
 	d.miner.NotifyNewBlock()
+	doneAt := time.Now()
+
+	lanes := []struct {
+		lane    string
+		elapsed time.Duration
+	}{
+		{"decode", decodedAt.Sub(receivedAt)},
+		{"slot_wait", slotAt.Sub(decodedAt)},
+		{"lock_wait", lockedAt.Sub(slotAt)},
+		{"process", processTimings.Total},
+		{"mempool_update", mempoolAt.Sub(acceptedAt)},
+		{"checkpoint_save", checkpointAt.Sub(mempoolAt)},
+		{"relay", relayAt.Sub(checkpointAt)},
+		{"notify", doneAt.Sub(relayAt)},
+		{"received_to_accepted", acceptedAt.Sub(receivedAt)},
+		{"total", doneAt.Sub(receivedAt)},
+	}
+	for _, l := range lanes {
+		d.latency.Observe(latencyFamilyPeerBlock, l.lane, l.elapsed)
+	}
+	log.Printf(
+		"[perf] peer block height=%d hash=%x from=%s txs=%d decode=%s slot_wait=%s lock_wait=%s process=%s (validate=%s pow=%s reorg=%s) mempool=%s checkpoint=%s relay=%s notify=%s total=%s",
+		block.Header.Height, hash[:8], from.String()[:8], len(block.Transactions),
+		decodedAt.Sub(receivedAt), slotAt.Sub(decodedAt), lockedAt.Sub(slotAt),
+		processTimings.Total, processTimings.Validate, processTimings.Detail.PoW, processTimings.Reorg,
+		mempoolAt.Sub(acceptedAt), checkpointAt.Sub(mempoolAt), relayAt.Sub(checkpointAt),
+		doneAt.Sub(relayAt), doneAt.Sub(receivedAt),
+	)
 }
 
 // handleTx processes a transaction from a peer (fluff phase)
@@ -907,7 +983,7 @@ func (d *Daemon) processBlockData(data []byte) error {
 	d.mu.Lock()
 
 	prevBest := d.chain.BestHash()
-	accepted, isMainChain, err := d.chain.ProcessBlock(&block)
+	accepted, isMainChain, processTimings, err := d.chain.ProcessBlockTimed(&block)
 	if err != nil {
 		d.mu.Unlock()
 		return fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
@@ -916,6 +992,7 @@ func (d *Daemon) processBlockData(data []byte) error {
 		d.mu.Unlock()
 		return ErrDuplicateBlock
 	}
+	d.latency.observeProcessBlock(tipSourceSync, processTimings)
 
 	if !isMainChain {
 		d.mu.Unlock()
@@ -1159,39 +1236,99 @@ func (d *Daemon) processTxData(data []byte) error {
 }
 
 // Stats returns daemon statistics
+type DaemonCurrentProcessBlockStats struct {
+	Height                   uint64 `json:"height"`
+	TxCount                  int    `json:"tx_count"`
+	Stage                    string `json:"stage"`
+	StartedAtUnixMillis      int64  `json:"started_at_unix_millis"`
+	StageStartedAtUnixMillis int64  `json:"stage_started_at_unix_millis"`
+	ElapsedMillis            uint64 `json:"elapsed_millis"`
+	StageElapsedMillis       uint64 `json:"stage_elapsed_millis"`
+}
+
+type DaemonLastProcessBlockStats struct {
+	Height                uint64 `json:"height"`
+	TxCount               int    `json:"tx_count"`
+	CompletedAtUnixMillis int64  `json:"completed_at_unix_millis"`
+	ValidateMillis        uint64 `json:"validate_millis"`
+	CommitMillis          uint64 `json:"commit_millis"`
+	ReorgMillis           uint64 `json:"reorg_millis"`
+	TotalMillis           uint64 `json:"total_millis"`
+	Accepted              bool   `json:"accepted"`
+	MainChain             bool   `json:"main_chain"`
+	Error                 string `json:"error,omitempty"`
+}
+
 type DaemonStats struct {
-	PID               int    `json:"pid"`
-	PeerID            string `json:"peer_id"`
-	Peers             int    `json:"peers"`
-	ChainHeight       uint64 `json:"chain_height"`
-	BestHash          string `json:"best_hash"`
-	TotalWork         uint64 `json:"total_work"`
-	MempoolSize       int    `json:"mempool_size"`
-	MempoolBytes      int    `json:"mempool_bytes"`
-	MempoolGeneration uint64 `json:"mempool_generation"`
-	Syncing           bool   `json:"syncing"`
-	SyncProgress      uint64 `json:"sync_progress,omitempty"`
-	SyncTarget        uint64 `json:"sync_target,omitempty"`
-	SyncPercent       string `json:"sync_percent,omitempty"`
-	IdentityAge       string `json:"identity_age"`
+	PID                 int                             `json:"pid"`
+	PeerID              string                          `json:"peer_id"`
+	Peers               int                             `json:"peers"`
+	ChainHeight         uint64                          `json:"chain_height"`
+	BestHash            string                          `json:"best_hash"`
+	TotalWork           uint64                          `json:"total_work"`
+	MempoolSize         int                             `json:"mempool_size"`
+	MempoolBytes        int                             `json:"mempool_bytes"`
+	MempoolGeneration   uint64                          `json:"mempool_generation"`
+	Syncing             bool                            `json:"syncing"`
+	SyncProgress        uint64                          `json:"sync_progress,omitempty"`
+	SyncTarget          uint64                          `json:"sync_target,omitempty"`
+	SyncPercent         string                          `json:"sync_percent,omitempty"`
+	IdentityAge         string                          `json:"identity_age"`
+	CurrentProcessBlock *DaemonCurrentProcessBlockStats `json:"current_process_block,omitempty"`
+	LastProcessBlock    *DaemonLastProcessBlockStats    `json:"last_process_block,omitempty"`
 }
 
 func (d *Daemon) Stats() DaemonStats {
-	height, bestHash, totalWork := d.chain.TipFast()
+	snapshot := d.chain.TipSnapshot()
+	processBlock := d.chain.ProcessBlockSnapshot()
 	mempoolStats := d.mempool.Stats()
+	now := time.Now()
 
 	stats := DaemonStats{
 		PID:               os.Getpid(),
 		PeerID:            d.node.PeerID().String(),
 		Peers:             len(d.node.Peers()),
-		ChainHeight:       height,
-		BestHash:          fmt.Sprintf("%x", bestHash[:8]),
-		TotalWork:         totalWork,
+		ChainHeight:       snapshot.Height,
+		BestHash:          fmt.Sprintf("%x", snapshot.BestHash[:8]),
+		TotalWork:         snapshot.TotalWork,
 		MempoolSize:       mempoolStats.Count,
 		MempoolBytes:      mempoolStats.SizeBytes,
 		MempoolGeneration: mempoolStats.Generation,
 		Syncing:           d.syncMgr.IsSyncing(),
 		IdentityAge:       d.node.IdentityAge().Round(time.Second).String(),
+	}
+	if processBlock.Active {
+		elapsedMillis := uint64(0)
+		stageElapsedMillis := uint64(0)
+		if processBlock.CurrentStartedAtUnixMillis > 0 {
+			elapsedMillis = uint64(now.Sub(time.UnixMilli(processBlock.CurrentStartedAtUnixMillis)) / time.Millisecond)
+		}
+		if processBlock.CurrentStageStartedAtUnixMillis > 0 {
+			stageElapsedMillis = uint64(now.Sub(time.UnixMilli(processBlock.CurrentStageStartedAtUnixMillis)) / time.Millisecond)
+		}
+		stats.CurrentProcessBlock = &DaemonCurrentProcessBlockStats{
+			Height:                   processBlock.CurrentHeight,
+			TxCount:                  processBlock.CurrentTxCount,
+			Stage:                    processBlock.CurrentStage,
+			StartedAtUnixMillis:      processBlock.CurrentStartedAtUnixMillis,
+			StageStartedAtUnixMillis: processBlock.CurrentStageStartedAtUnixMillis,
+			ElapsedMillis:            elapsedMillis,
+			StageElapsedMillis:       stageElapsedMillis,
+		}
+	}
+	if processBlock.LastCompletedAtUnixMillis > 0 {
+		stats.LastProcessBlock = &DaemonLastProcessBlockStats{
+			Height:                processBlock.LastHeight,
+			TxCount:               processBlock.LastTxCount,
+			CompletedAtUnixMillis: processBlock.LastCompletedAtUnixMillis,
+			ValidateMillis:        processBlock.LastValidateMillis,
+			CommitMillis:          processBlock.LastCommitMillis,
+			ReorgMillis:           processBlock.LastReorgMillis,
+			TotalMillis:           processBlock.LastTotalMillis,
+			Accepted:              processBlock.LastAccepted,
+			MainChain:             processBlock.LastMainChain,
+			Error:                 processBlock.LastError,
+		}
 	}
 
 	// Add sync progress if syncing
@@ -1264,33 +1401,65 @@ func (d *Daemon) MinerStats() MinerStats {
 // SubmitTransaction adds a transaction to mempool and broadcasts to peers.
 // SubmitBlock validates a mined block, adds it to the chain, and broadcasts to peers.
 func (d *Daemon) SubmitBlock(block *Block) error {
+	_, err := d.SubmitBlockTimed(block)
+	return err
+}
+
+// SubmitBlockTimed is SubmitBlock plus a stage breakdown. Accepted blocks are
+// recorded in the daemon_submit_block latency family and logged, since every
+// millisecond here delays the network seeing our block.
+func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
+	var t submitBlockTimings
+	startedAt := time.Now()
 	d.mu.Lock()
+	lockedAt := time.Now()
+	t.LockWait = lockedAt.Sub(startedAt)
 	if err := d.validateSubmitBlockStaleLocked(block); err != nil {
 		d.mu.Unlock()
-		return err
+		d.observeRejectedSubmit(startedAt)
+		return t, err
 	}
+	staleCheckedAt := time.Now()
+	t.StaleCheck = staleCheckedAt.Sub(lockedAt)
 
 	prevBest := d.chain.BestHash()
-	accepted, isMainChain, err := d.chain.ProcessBlock(block)
+	accepted, isMainChain, processTimings, err := d.chain.ProcessBlockTimed(block)
+	t.Process = processTimings
 	if err != nil {
 		d.mu.Unlock()
-		return fmt.Errorf("failed to process block: %w", err)
+		d.observeRejectedSubmit(startedAt)
+		return t, fmt.Errorf("failed to process block: %w", err)
 	}
 	if !accepted {
 		d.mu.Unlock()
-		return fmt.Errorf("block not accepted (duplicate or stale)")
+		d.observeRejectedSubmit(startedAt)
+		return t, fmt.Errorf("block not accepted (duplicate or stale)")
 	}
+	acceptedAt := time.Now()
 
 	if isMainChain {
 		d.updateMempoolForAcceptedMainChain(block, prevBest)
 		d.miner.NotifyNewBlock()
 	}
 	d.mu.Unlock()
+	mempoolAt := time.Now()
+	t.MempoolUpdate = mempoolAt.Sub(acceptedAt)
 
-	d.maybeSaveCheckpoints()
+	hash := block.Hash()
+	if isMainChain {
+		d.recordTipAccepted(hash, tipSourceSubmit, startedAt, acceptedAt)
+		d.maybeSaveCheckpoints()
+	}
+	checkpointAt := time.Now()
+	t.CheckpointSave = checkpointAt.Sub(mempoolAt)
 
 	// Broadcast to peers
-	d.syncMgr.BroadcastBlock(marshalBlockJSON(block))
+	blockData := marshalBlockJSON(block)
+	marshaledAt := time.Now()
+	t.Marshal = marshaledAt.Sub(checkpointAt)
+	d.syncMgr.BroadcastBlock(blockData)
+	broadcastAt := time.Now()
+	t.Broadcast = broadcastAt.Sub(marshaledAt)
 
 	// Notify wallet/UI subscribers only for blocks that became main-chain.
 	// Side-chain blocks may be accepted for fork choice, but scanning them would
@@ -1299,8 +1468,42 @@ func (d *Daemon) SubmitBlock(block *Block) error {
 		d.notifyBlock(block)
 	}
 	d.notifyMinedBlock(block)
+	doneAt := time.Now()
+	t.Notify = doneAt.Sub(broadcastAt)
+	t.Total = doneAt.Sub(startedAt)
 
-	return nil
+	d.latency.observeProcessBlock(tipSourceSubmit, processTimings)
+	for _, l := range []struct {
+		lane    string
+		elapsed time.Duration
+	}{
+		{"lock_wait", t.LockWait},
+		{"stale_check", t.StaleCheck},
+		{"process", processTimings.Total},
+		{"mempool_update", t.MempoolUpdate},
+		{"checkpoint_save", t.CheckpointSave},
+		{"marshal", t.Marshal},
+		{"broadcast", t.Broadcast},
+		{"notify", t.Notify},
+		{"accepted", acceptedAt.Sub(startedAt)},
+		{"total", t.Total},
+	} {
+		d.latency.Observe(latencyFamilySubmitBlock, l.lane, l.elapsed)
+	}
+	log.Printf(
+		"[perf] submitted block height=%d hash=%x main=%t txs=%d bytes=%d lock_wait=%s stale_check=%s process=%s (validate=%s pow=%s tx=%s reorg=%s commit=%s) mempool=%s checkpoint=%s marshal=%s broadcast=%s notify=%s total=%s",
+		block.Header.Height, hash[:8], isMainChain, len(block.Transactions), len(blockData),
+		t.LockWait, t.StaleCheck, processTimings.Total, processTimings.Validate,
+		processTimings.Detail.PoW, processTimings.Detail.TxValidation, processTimings.Reorg,
+		processTimings.Commit, t.MempoolUpdate, t.CheckpointSave, t.Marshal, t.Broadcast,
+		t.Notify, t.Total,
+	)
+
+	return t, nil
+}
+
+func (d *Daemon) observeRejectedSubmit(startedAt time.Time) {
+	d.latency.Observe(latencyFamilySubmitBlock, "rejected_total", time.Since(startedAt))
 }
 
 func (d *Daemon) validateSubmitBlockStaleLocked(block *Block) error {

@@ -66,6 +66,8 @@ func (s *APIServer) registerPrivateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mining/renewtemplate", s.handleRenewBlockTemplate)
 	mux.HandleFunc("POST /api/mining/submitblock", s.handleSubmitBlock)
 
+	mux.HandleFunc("GET /api/perf/latency", s.handlePerfLatency)
+
 	// Dangerous operations
 	mux.HandleFunc("POST /api/purge", s.handlePurgeData)
 
