@@ -1623,19 +1623,31 @@ func (sm *SyncManager) IsSyncing() bool {
 // only a minority of peers advertise doesn't count until a block above the
 // local tip arrives: one peer's status must not stop template serving.
 func (sm *SyncManager) IsSyncingFarBehind(tolerance uint64) bool {
+	return sm.BlocksBehind() > tolerance
+}
+
+// BlocksBehind reports how many blocks an active sync run's target is ahead
+// of the local chain tip. It is 0 when no run is active, the tip is current, or
+// the target is an unverified claim from a minority of peers: a single peer's
+// status must not read as this node being behind, since it would stop template
+// serving and payouts for as long as the run lasts.
+func (sm *SyncManager) BlocksBehind() uint64 {
 	sm.mu.RLock()
 	syncing := sm.syncing
 	target := sm.syncTarget
 	unverified := sm.syncClaimUnverified
 	sm.mu.RUnlock()
 	if !syncing || unverified {
-		return false
+		return 0
 	}
 	// Compare against the live chain tip rather than syncProgress: the
 	// overlap re-download makes syncProgress regress below the tip, while
 	// the tip itself only moves forward.
 	height := sm.getStatus().Height
-	return target > height && target-height > tolerance
+	if target <= height {
+		return 0
+	}
+	return target - height
 }
 
 // PeerTipChecked reports whether a sync check has compared the local chain

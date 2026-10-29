@@ -85,17 +85,20 @@ func (sm *SyncManager) claimCoolingDown(n *Node) bool {
 	return cooling
 }
 
-func TestFarBehindIgnoresUnverifiedClaim(t *testing.T) {
+func TestBlocksBehindIgnoresUnverifiedClaim(t *testing.T) {
 	sm := newFarBehindTestManager(100)
 	sm.syncing = true
 	sm.syncTarget = 5000
 	sm.syncClaimUnverified = true
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("unverified claim: %d blocks behind, want 0", got)
+	}
 	if sm.IsSyncingFarBehind(2) {
 		t.Fatal("an unverified claim must not stop template serving")
 	}
 	sm.syncClaimUnverified = false
-	if !sm.IsSyncingFarBehind(2) {
-		t.Fatal("a verified target far ahead must count as behind")
+	if got := sm.BlocksBehind(); got != 4900 {
+		t.Fatalf("verified target: %d blocks behind, want 4900", got)
 	}
 }
 
@@ -117,6 +120,9 @@ func TestUndeliveredMinorityClaimEndsAndCoolsDownThePeer(t *testing.T) {
 
 	sm.checkSync()
 	waitForCondition(t, "the sync run to start", sm.IsSyncing)
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("minority claim: %d blocks behind, want 0", got)
+	}
 	if sm.IsSyncingFarBehind(0) {
 		t.Fatal("a minority claim must not stop template serving")
 	}
@@ -202,12 +208,12 @@ func TestCorroboratedClaimCountsAsBehindImmediately(t *testing.T) {
 
 	sm.checkSync()
 	waitForCondition(t, "the sync run to start", sm.IsSyncing)
-	if !sm.IsSyncingFarBehind(2) {
-		t.Fatal("a majority claim must count as behind immediately")
+	if got := sm.BlocksBehind(); got != 3 {
+		t.Fatalf("majority claim: %d blocks behind, want 3", got)
 	}
 	<-requested
 	time.Sleep(2 * sm.claimGiveUpAfter)
-	if !sm.IsSyncing() || !sm.IsSyncingFarBehind(2) {
+	if !sm.IsSyncing() || sm.BlocksBehind() != 3 {
 		t.Fatal("a majority claim must keep the full give-up time")
 	}
 	sm.cancel()
@@ -247,8 +253,8 @@ func TestDeliveredBlockVerifiesAClaim(t *testing.T) {
 	waitForCondition(t, "the delivered block to verify the claim", func() bool {
 		return sm.IsSyncing() && !sm.syncRunUnverified() && height.Load() == 11
 	})
-	if !sm.IsSyncingFarBehind(1) || sm.IsSyncingFarBehind(2) {
-		t.Fatal("a verified claim must count the two blocks still missing")
+	if got := sm.BlocksBehind(); got != 2 {
+		t.Fatalf("verified claim: %d blocks behind, want 2", got)
 	}
 	sm.cancel()
 	waitForCondition(t, "the canceled run to end", func() bool { return !sm.IsSyncing() })

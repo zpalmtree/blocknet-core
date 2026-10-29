@@ -1297,6 +1297,10 @@ type DaemonLastProcessBlockStats struct {
 	Error                 string `json:"error,omitempty"`
 }
 
+// DaemonStats is the daemon status report. Syncing means the chain is behind
+// the best peer tip; a sync run that only re-downloads blocks the node already
+// has (after briefly losing a propagation race) leaves it false, while
+// SyncInProgress reports any active run.
 type DaemonStats struct {
 	PID                 int                             `json:"pid"`
 	PeerID              string                          `json:"peer_id"`
@@ -1308,6 +1312,8 @@ type DaemonStats struct {
 	MempoolBytes        int                             `json:"mempool_bytes"`
 	MempoolGeneration   uint64                          `json:"mempool_generation"`
 	Syncing             bool                            `json:"syncing"`
+	SyncInProgress      bool                            `json:"sync_in_progress"`
+	BlocksBehind        uint64                          `json:"blocks_behind"`
 	SyncProgress        uint64                          `json:"sync_progress,omitempty"`
 	SyncTarget          uint64                          `json:"sync_target,omitempty"`
 	SyncPercent         string                          `json:"sync_percent,omitempty"`
@@ -1321,6 +1327,7 @@ func (d *Daemon) Stats() DaemonStats {
 	processBlock := d.chain.ProcessBlockSnapshot()
 	mempoolStats := d.mempool.Stats()
 	now := time.Now()
+	blocksBehind := d.syncMgr.BlocksBehind()
 
 	stats := DaemonStats{
 		PID:               os.Getpid(),
@@ -1332,7 +1339,9 @@ func (d *Daemon) Stats() DaemonStats {
 		MempoolSize:       mempoolStats.Count,
 		MempoolBytes:      mempoolStats.SizeBytes,
 		MempoolGeneration: mempoolStats.Generation,
-		Syncing:           d.syncMgr.IsSyncing(),
+		Syncing:           blocksBehind > 0,
+		SyncInProgress:    d.syncMgr.IsSyncing(),
+		BlocksBehind:      blocksBehind,
 		IdentityAge:       d.node.IdentityAge().Round(time.Second).String(),
 	}
 	if processBlock.Active {
@@ -1369,8 +1378,8 @@ func (d *Daemon) Stats() DaemonStats {
 		}
 	}
 
-	// Add sync progress if syncing
-	if stats.Syncing {
+	// Add sync progress while a sync run is active
+	if stats.SyncInProgress {
 		progress, target, _ := d.syncMgr.SyncProgress()
 		stats.SyncProgress = progress
 		stats.SyncTarget = target

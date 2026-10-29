@@ -61,3 +61,23 @@ func TestIsSyncingFarBehindExactTolerance(t *testing.T) {
 		t.Fatal("gap above tolerance must report far behind")
 	}
 }
+
+func TestBlocksBehindCountsOnlyAGapToTheTarget(t *testing.T) {
+	sm := newFarBehindTestManager(100)
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("no sync run: %d blocks behind, want 0", got)
+	}
+	sm.syncing = true
+	sm.syncTarget = 100
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("overlap re-download at the tip: %d blocks behind, want 0", got)
+	}
+	sm.syncTarget = 103
+	if got := sm.BlocksBehind(); got != 3 {
+		t.Fatalf("target 3 ahead: %d blocks behind, want 3", got)
+	}
+	sm.syncTarget = 90
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("target below the tip: %d blocks behind, want 0", got)
+	}
+}
