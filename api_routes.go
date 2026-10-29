@@ -56,6 +56,14 @@ func (s *APIServer) registerPrivateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/checkpoints/save", s.handleSaveCheckpoints)
 	mux.HandleFunc("POST /api/checkpoints/load", s.handleLoadCheckpoints)
 
+	// Wallet feed (read-only scan data for external wallet services)
+	mux.HandleFunc("GET /api/wallet-feed/blocks", s.handleWalletFeedBlocks)
+	mux.HandleFunc("GET /api/wallet-feed/tx/{txid}", s.handleWalletFeedTx)
+	mux.HandleFunc("GET /api/wallet-feed/params", s.handleWalletFeedParams)
+	mux.HandleFunc("POST /api/wallet-feed/ring-members", s.handleWalletFeedRingMembers)
+	mux.HandleFunc("POST /api/wallet-feed/key-images", s.handleWalletFeedKeyImages)
+	mux.HandleFunc("POST /api/wallet-feed/submit", s.handleWalletFeedSubmit)
+
 	// Mining
 	mux.HandleFunc("GET /api/mining", s.handleMiningStatus)
 	mux.HandleFunc("POST /api/mining/start", s.handleMiningStart)
@@ -65,6 +73,7 @@ func (s *APIServer) registerPrivateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mining/renewtemplate", s.handleRenewBlockTemplate)
 	mux.HandleFunc("POST /api/mining/submitblock", s.handleSubmitBlock)
 
+	// Performance telemetry
 	mux.HandleFunc("GET /api/perf/latency", s.handlePerfLatency)
 
 	// Dangerous operations
