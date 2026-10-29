@@ -2723,6 +2723,7 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	buildStartedAt := time.Now()
 	// Read height, prevHash, and difficulty as a single atomic snapshot so a
 	// concurrent reorg cannot produce an inconsistent template.
 	tp := s.daemon.Chain().TemplateParams()
@@ -2747,15 +2748,18 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Create coinbase paying to the selected reward address
+	coinbaseStartedAt := time.Now()
 	coinbase, err := CreateCoinbase(recipientSpendPub, recipientViewPub, reward, tp.Height)
 	if err != nil {
 		writeInternal(w, r, http.StatusInternalServerError, "internal error", err)
 		return
 	}
+	mempoolStartedAt := time.Now()
 
 	// Get mempool transactions sorted by fee rate together with the exact
 	// generation represented by this selection.
 	txs, mempoolGeneration := s.daemon.Mempool().GetTransactionsForBlockSnapshot(MaxBlockSize-1000, 1000)
+	merkleStartedAt := time.Now()
 
 	// Build transaction list (coinbase first)
 	allTxs := make([]*Transaction, 0, len(txs)+1)
@@ -2785,6 +2789,7 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 
 	// Compute target for PoW validation
 	target := DifficultyToTarget(block.Header.Difficulty)
+	leaseStartedAt := time.Now()
 	templateID, expiresAt, err := s.rememberMiningTemplateLease(block)
 	if err != nil {
 		switch {
@@ -2802,6 +2807,7 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	builtAt := time.Now()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"block":                       block,
 		"target":                      fmt.Sprintf("%x", target),
@@ -2810,7 +2816,23 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		"template_id":                 templateID,
 		"template_expires_at_unix_ms": expiresAt.UnixMilli(),
 		"mempool_generation":          mempoolGeneration,
+		"build_us":                    int64(builtAt.Sub(buildStartedAt) / time.Microsecond),
 	})
+	for _, l := range []struct {
+		lane    string
+		elapsed time.Duration
+	}{
+		{"params", coinbaseStartedAt.Sub(buildStartedAt)},
+		{"coinbase", mempoolStartedAt.Sub(coinbaseStartedAt)},
+		{"mempool_select", merkleStartedAt.Sub(mempoolStartedAt)},
+		{"merkle", leaseStartedAt.Sub(merkleStartedAt)},
+		{"lease", builtAt.Sub(leaseStartedAt)},
+		{"build", builtAt.Sub(buildStartedAt)},
+		{"write", time.Since(builtAt)},
+		{"total", time.Since(buildStartedAt)},
+	} {
+		s.daemon.ObserveLatency(latencyFamilyBlockTemplate, l.lane, l.elapsed)
+	}
 }
 
 // handleRenewBlockTemplate extends the compact-submission lease for a template
@@ -2867,6 +2889,7 @@ func (s *APIServer) handleSubmitBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestStartedAt := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -2902,7 +2925,11 @@ func (s *APIServer) handleSubmitBlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.daemon.SubmitBlock(&block); err != nil {
+	decoded := time.Since(requestStartedAt)
+	s.daemon.ObserveLatency(latencyFamilySubmitBlock, "request_decode", decoded)
+
+	timings, err := s.daemon.SubmitBlockTimed(&block)
+	if err != nil {
 		if errors.Is(err, ErrStaleBlock) {
 			writeError(w, http.StatusBadRequest, "block rejected as stale")
 			return
@@ -2912,10 +2939,13 @@ func (s *APIServer) handleSubmitBlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hash := block.Hash()
+	timingsMicros := timings.responseMicros()
+	timingsMicros["request_decode"] = int64(decoded / time.Microsecond)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accepted": true,
-		"hash":     fmt.Sprintf("%x", hash),
-		"height":   block.Header.Height,
+		"accepted":   true,
+		"hash":       fmt.Sprintf("%x", hash),
+		"height":     block.Header.Height,
+		"timings_us": timingsMicros,
 	})
 }
 
@@ -3337,4 +3367,10 @@ func (s *APIServer) createTxBuilder() *wallet.Builder {
 	}
 
 	return wallet.NewBuilder(s.wallet, cfg)
+}
+
+func (s *APIServer) handlePerfLatency(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"families": s.daemon.LatencySnapshot(),
+	})
 }
