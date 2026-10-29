@@ -623,6 +623,15 @@ func (d *Daemon) Start() error {
 		log.Printf("[perf] startup stage=resolve_seed_nodes waited=%s", time.Since(seedsStartedAt).Round(time.Millisecond))
 	}
 
+	go func() {
+		warmStartedAt := time.Now()
+		if err := PowWarm(); err != nil {
+			log.Printf("Warning: %v", err)
+			return
+		}
+		log.Printf("[perf] startup stage=pow_warm took=%s", time.Since(warmStartedAt).Round(time.Millisecond))
+	}()
+
 	// Start P2P node
 	if err := d.node.Start(); err != nil {
 		// Bootstrap assist: if enabled, write peer.txt even when we couldn't connect to seeds.

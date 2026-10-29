@@ -22,6 +22,24 @@ const POW_ITERATIONS: u32 = 1;
 const POW_PARALLELISM: u32 = 1;
 const POW_OUTPUT_LEN: usize = 32;
 
+fn pow_kernel() -> &'static FixedArgon2id {
+    // Fixed Argon2id v0x13, one pass and one lane, with runtime CPU checks.
+    POW_KERNEL.get_or_init(|| {
+        FixedArgon2id::with_kernel(POW_MEMORY_KB, CpuKernel::preferred_for_verification())
+            .expect("verification dispatch selects a supported kernel")
+    })
+}
+
+/// Fault in one arena using the same bounded cache as block verification.
+#[unsafe(no_mangle)]
+pub extern "C" fn blocknet_pow_warm() -> i32 {
+    let pool = POW_MEMORY.get_or_init(|| MemoryPool::new(pow_kernel().block_count()));
+    match pool.warm() {
+        Ok(()) => 0,
+        Err(()) => -2,
+    }
+}
+
 /// Compute Argon2id hash for proof of work
 ///
 /// # Arguments
@@ -44,11 +62,7 @@ pub extern "C" fn blocknet_pow_hash(
     let header = unsafe { std::slice::from_raw_parts(header_ptr, header_len) };
     let nonce_bytes = nonce.to_le_bytes();
 
-    // Fixed Argon2id v0x13, one pass and one lane, with runtime CPU checks.
-    let hasher = POW_KERNEL.get_or_init(|| {
-        FixedArgon2id::with_kernel(POW_MEMORY_KB, CpuKernel::preferred_for_verification())
-            .expect("verification dispatch selects a supported kernel")
-    });
+    let hasher = pow_kernel();
     let pool = POW_MEMORY.get_or_init(|| MemoryPool::new(hasher.block_count()));
     let mut memory = match pool.checkout() {
         Ok(memory) => memory,
@@ -152,6 +166,7 @@ mod tests {
         let reference = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let header = [0x5au8; 80];
         for nonce in [0u64, u64::MAX, 0] {
+            assert_eq!(blocknet_pow_warm(), 0);
             let mut actual = [0u8; 32];
             let mut expected = [0u8; 32];
             assert_eq!(
