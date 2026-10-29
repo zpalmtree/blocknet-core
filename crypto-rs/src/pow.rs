@@ -21,13 +21,15 @@ static POW_KERNEL: OnceLock<PowKernel> = OnceLock::new();
 
 struct PowKernel {
     hasher: fixed_argon::FixedArgon2id,
-    arenas: Mutex<Vec<Vec<fixed_argon::PowBlock>>>,
+    arenas: Mutex<Vec<PowArena>>,
 }
 
 impl PowKernel {
     fn new() -> Self {
         Self {
-            hasher: fixed_argon::FixedArgon2id::new(POW_MEMORY_KB),
+            hasher: host_kernel()
+                .and_then(|kernel| fixed_argon::FixedArgon2id::with_kernel(POW_MEMORY_KB, kernel).ok())
+                .unwrap_or_else(|| fixed_argon::FixedArgon2id::new(POW_MEMORY_KB)),
             arenas: Mutex::new(Vec::new()),
         }
     }
@@ -41,7 +43,7 @@ impl PowKernel {
         let mut arenas = self.arenas.lock().map_err(|_| -2)?;
         let arena = arenas
             .pop()
-            .unwrap_or_else(|| vec![fixed_argon::PowBlock::default(); self.hasher.block_count()]);
+            .unwrap_or_else(|| PowArena::new(self.hasher.block_count()));
         Ok(PowArenaGuard {
             arenas: &self.arenas,
             arena: Some(arena),
@@ -49,9 +51,174 @@ impl PowKernel {
     }
 }
 
+/// Compression path override for this host, or `None` for the kernel crate's
+/// default dispatch. AMD Zen 4/Zen 5 (family 19h/1Ah) with AVX-512 use the
+/// streaming kernels Seine mines with and the pool verifies with on those
+/// CPUs. The ISA support check stays mandatory.
+fn host_kernel() -> Option<fixed_argon::CpuKernel> {
+    let (vendor, family) = cpu_vendor_family()?;
+    if vendor != *b"AuthenticAMD" {
+        return None;
+    }
+    // Zen 4's far L2 prefetch costs Zen 5 1-3%, so family 1Ah keeps the
+    // plain streaming kernel.
+    let preferred: &[fixed_argon::CpuKernel] = match family {
+        0x19 => &[
+            fixed_argon::CpuKernel::Avx512256StreamL2,
+            fixed_argon::CpuKernel::Avx512256Stream,
+        ],
+        0x1a => &[fixed_argon::CpuKernel::Avx512256Stream],
+        _ => &[],
+    };
+    preferred
+        .iter()
+        .copied()
+        .find(|kernel| kernel.is_supported())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpu_vendor_family() -> Option<([u8; 12], u32)> {
+    use std::arch::x86_64::__cpuid;
+    // Safety: CPUID leaves 0 and 1 exist on every x86_64 processor. Newer
+    // toolchains made `__cpuid` safe; older ones still require the block.
+    #[allow(unused_unsafe)]
+    let (leaf0, leaf1) = unsafe { (__cpuid(0), __cpuid(1)) };
+    let mut vendor = [0u8; 12];
+    vendor[..4].copy_from_slice(&leaf0.ebx.to_le_bytes());
+    vendor[4..8].copy_from_slice(&leaf0.edx.to_le_bytes());
+    vendor[8..].copy_from_slice(&leaf0.ecx.to_le_bytes());
+    let base_family = (leaf1.eax >> 8) & 0xf;
+    let family = if base_family == 0xf {
+        base_family + ((leaf1.eax >> 20) & 0xff)
+    } else {
+        base_family
+    };
+    Some((vendor, family))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_vendor_family() -> Option<([u8; 12], u32)> {
+    None
+}
+
+/// A 2 GiB Argon2 arena. On Linux it is an anonymous mapping hinted for
+/// transparent hugepages: Argon2's data-dependent reads across 2 GiB miss the
+/// TLB on almost every block with 4 KiB pages, which roughly doubles the hash
+/// time. Hosts with THP set to `madvise` only back memory that asks for it.
+enum PowArena {
+    #[cfg(target_os = "linux")]
+    Mapped(MappedArena),
+    Heap(Vec<fixed_argon::PowBlock>),
+}
+
+impl PowArena {
+    fn new(block_count: usize) -> Self {
+        #[cfg(target_os = "linux")]
+        if let Some(arena) = MappedArena::new(block_count) {
+            return PowArena::Mapped(arena);
+        }
+        PowArena::Heap(vec![fixed_argon::PowBlock::default(); block_count])
+    }
+
+    /// Writes one byte per 4 KiB page so the first hash after startup does
+    /// not pay for half a million page faults on the block path.
+    fn prefault(&mut self) {
+        let blocks = self.deref_mut();
+        let bytes = std::mem::size_of_val(blocks);
+        let base = blocks.as_mut_ptr() as *mut u8;
+        for offset in (0..bytes).step_by(4096) {
+            // Safety: offset < bytes, inside this arena's allocation.
+            unsafe { std::ptr::write_volatile(base.add(offset), 0) };
+        }
+    }
+}
+
+impl Deref for PowArena {
+    type Target = [fixed_argon::PowBlock];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            #[cfg(target_os = "linux")]
+            PowArena::Mapped(arena) => arena.as_slice(),
+            PowArena::Heap(arena) => arena,
+        }
+    }
+}
+
+impl DerefMut for PowArena {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            #[cfg(target_os = "linux")]
+            PowArena::Mapped(arena) => arena.as_mut_slice(),
+            PowArena::Heap(arena) => arena,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct MappedArena {
+    ptr: std::ptr::NonNull<fixed_argon::PowBlock>,
+    mapped_len: usize,
+    block_count: usize,
+}
+
+// Safety: the arena exclusively owns its private anonymous mapping.
+#[cfg(target_os = "linux")]
+unsafe impl Send for MappedArena {}
+
+#[cfg(target_os = "linux")]
+impl MappedArena {
+    const HUGE_2M: usize = 2 * 1024 * 1024;
+
+    fn new(block_count: usize) -> Option<Self> {
+        let byte_len = block_count.checked_mul(std::mem::size_of::<fixed_argon::PowBlock>())?;
+        let mapped_len = byte_len.checked_add(Self::HUGE_2M - 1)? / Self::HUGE_2M * Self::HUGE_2M;
+        // Safety: a fresh private anonymous mapping, owned by the result.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mapped_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return None;
+        }
+        // Best effort: without THP the mapping still works on 4 KiB pages.
+        unsafe { libc::madvise(ptr, mapped_len, libc::MADV_HUGEPAGE) };
+        Some(Self {
+            ptr: std::ptr::NonNull::new(ptr as *mut fixed_argon::PowBlock)?,
+            mapped_len,
+            block_count,
+        })
+    }
+
+    fn as_slice(&self) -> &[fixed_argon::PowBlock] {
+        // Safety: the mapping holds at least block_count blocks, is page
+        // aligned, and zeroed memory is a valid PowBlock (plain u64s).
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.block_count) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [fixed_argon::PowBlock] {
+        // Safety: as above, and &mut self gives exclusive access.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.block_count) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MappedArena {
+    fn drop(&mut self) {
+        // Safety: ptr/mapped_len describe exactly the mapping made in new().
+        unsafe { libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.mapped_len) };
+    }
+}
+
 struct PowArenaGuard<'a> {
-    arenas: &'a Mutex<Vec<Vec<fixed_argon::PowBlock>>>,
-    arena: Option<Vec<fixed_argon::PowBlock>>,
+    arenas: &'a Mutex<Vec<PowArena>>,
+    arena: Option<PowArena>,
 }
 
 impl Deref for PowArenaGuard<'_> {
@@ -128,6 +295,30 @@ pub extern "C" fn blocknet_pow_hash(
             0
         }
         Err(err) => err,
+    }
+}
+
+/// Allocate and fault in one PoW arena ahead of time, so the first block
+/// verified after startup runs at steady-state speed.
+///
+/// # Returns
+/// * 0 on success, or error code
+#[unsafe(no_mangle)]
+pub extern "C" fn blocknet_pow_warm() -> i32 {
+    let kernel = pow_kernel();
+    match kernel.arenas.lock() {
+        Ok(arenas) if !arenas.is_empty() => return 0,
+        Ok(_) => {}
+        Err(_) => return -2,
+    }
+    let mut arena = PowArena::new(kernel.hasher.block_count());
+    arena.prefault();
+    match kernel.arenas.lock() {
+        Ok(mut arenas) => {
+            arenas.push(arena);
+            0
+        }
+        Err(_) => -2,
     }
 }
 
@@ -238,6 +429,69 @@ mod tests {
                         "mismatch for memory_kib={memory_kib} nonce={nonce}"
                     );
                 }
+            }
+        }
+    }
+
+    fn host_hasher(memory_kib: u32) -> fixed_argon::FixedArgon2id {
+        host_kernel()
+            .and_then(|kernel| fixed_argon::FixedArgon2id::with_kernel(memory_kib, kernel).ok())
+            .unwrap_or_else(|| fixed_argon::FixedArgon2id::new(memory_kib))
+    }
+
+    #[test]
+    fn host_kernel_matches_reference_for_small_memory() {
+        let header = b"test_block_header_data".as_slice();
+        for memory_kib in [8u32, 32, 4096] {
+            let hasher = host_hasher(memory_kib);
+            let mut arena = vec![fixed_argon::PowBlock::default(); hasher.block_count()];
+            for nonce in [0u64, 7, 1_000_003] {
+                let mut actual = [0u8; 32];
+                hash_with_fixed_argon(&hasher, &mut arena, header, nonce, &mut actual)
+                    .expect("host kernel hash should succeed");
+                assert_eq!(
+                    actual,
+                    reference_pow_hash(header, nonce, memory_kib),
+                    "mismatch for {} memory_kib={memory_kib} nonce={nonce}",
+                    hasher.isa_label()
+                );
+            }
+        }
+    }
+
+    /// Full 2 GiB parity of the production path against the reference
+    /// argon2 crate. Needs ~4 GiB of memory, so run it explicitly:
+    /// `cargo test --release -- --ignored production_hash_matches_reference`.
+    #[test]
+    #[ignore]
+    fn production_hash_matches_reference() {
+        let header = b"headerbase0123456789abcdefghijklmnop".as_slice();
+        let nonce = 7_598_379_899_254_000_019u64;
+        let mut actual = [0u8; 32];
+        assert_eq!(
+            blocknet_pow_hash(header.as_ptr(), header.len(), nonce, actual.as_mut_ptr()),
+            0
+        );
+        assert_eq!(actual, reference_pow_hash(header, nonce, POW_MEMORY_KB));
+    }
+
+    #[test]
+    fn arena_backings_match_reference() {
+        let memory_kib = 4096u32;
+        let hasher = host_hasher(memory_kib);
+        let header = b"headerbase0123456789abcdefghijklmnop".as_slice();
+        let mut arena = PowArena::new(hasher.block_count());
+        #[cfg(target_os = "linux")]
+        assert!(matches!(arena, PowArena::Mapped(_)));
+        arena.prefault();
+        let mut heap = PowArena::Heap(vec![fixed_argon::PowBlock::default(); hasher.block_count()]);
+        for nonce in [0u64, 42, 1_000_003] {
+            let expected = reference_pow_hash(header, nonce, memory_kib);
+            for arena in [&mut arena, &mut heap] {
+                let mut actual = [0u8; 32];
+                hash_with_fixed_argon(&hasher, arena.deref_mut(), header, nonce, &mut actual)
+                    .expect("fixed kernel hash should succeed");
+                assert_eq!(actual, expected, "mismatch for nonce={nonce}");
             }
         }
     }

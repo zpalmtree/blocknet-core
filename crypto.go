@@ -1010,6 +1010,15 @@ func PowHash(header []byte, nonce uint64) ([32]byte, error) {
 	return output, nil
 }
 
+// PowWarm allocates and faults in one PoW arena so the first block verified
+// after startup doesn't pay for 2GB of page faults.
+func PowWarm() error {
+	if result := C.blocknet_pow_warm(); result != 0 {
+		return fmt.Errorf("pow warm failed (error %d)", result)
+	}
+	return nil
+}
+
 // PowCheckTarget checks if a hash meets the difficulty target
 // Returns true if hash < target (valid block)
 func PowCheckTarget(hash, target [32]byte) bool {
