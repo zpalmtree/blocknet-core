@@ -135,6 +135,12 @@ func txDerivationMode(isCoinbase bool, height uint64) uint32 {
 	return scanModeIndexed
 }
 
+// TxDerivationMode exposes the ScanOutputsBatch mode rule for scanners outside
+// this package (e.g. the hosted wallet service) so they cannot drift from it.
+func TxDerivationMode(isCoinbase bool, height uint64) uint32 {
+	return txDerivationMode(isCoinbase, height)
+}
+
 // matchTxOutputs finds which of a transaction's outputs are owned by the wallet.
 // It is read-only with respect to wallet state (it only reads the immutable key
 // material passed in), so it is safe to run concurrently across transactions.
