@@ -376,8 +376,8 @@ func TestStrangerCannotBorrowDialedPeersCredibility(t *testing.T) {
 	sm.fetchEWMA.Store(int64(time.Millisecond))
 	sm.checkSync()
 	waitOutcome(t, "the run to start", 5*time.Second, sm.IsSyncing)
-	if !sm.IsSyncingFarBehind(0) || sm.IsSyncingFarBehind(1) {
-		t.Fatal("the node should count as the 1 block behind our dialed peers claim")
+	if got := sm.BlocksBehind(); got != 1 {
+		t.Fatalf("blocks behind = %d, want the 1 our dialed peers claim", got)
 	}
 	if sm.IsSyncingFarBehind(2) {
 		t.Fatal("a stranger's claim stopped template serving")

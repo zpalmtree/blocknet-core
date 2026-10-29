@@ -85,17 +85,20 @@ func (sm *SyncManager) claimCoolingDown(n *Node) bool {
 	return cooling
 }
 
-func TestFarBehindIgnoresUnverifiedClaim(t *testing.T) {
+func TestBlocksBehindIgnoresUnverifiedClaim(t *testing.T) {
 	sm := newFarBehindTestManager(100)
 	sm.syncing = true
 	sm.syncTarget = 5000
 	sm.syncClaimUnverified = true
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("unverified claim: %d blocks behind, want 0", got)
+	}
 	if sm.IsSyncingFarBehind(2) {
 		t.Fatal("an unverified claim must not stop template serving")
 	}
 	sm.syncClaimUnverified = false
-	if !sm.IsSyncingFarBehind(2) {
-		t.Fatal("a verified target far ahead must count as behind")
+	if got := sm.BlocksBehind(); got != 4900 {
+		t.Fatalf("verified target: %d blocks behind, want 4900", got)
 	}
 }
 
@@ -117,6 +120,9 @@ func TestUndeliveredMinorityClaimEndsAndCoolsDownThePeer(t *testing.T) {
 
 	sm.checkSync()
 	waitForCondition(t, "the sync run to start", sm.IsSyncing)
+	if got := sm.BlocksBehind(); got != 0 {
+		t.Fatalf("minority claim: %d blocks behind, want 0", got)
+	}
 	if sm.IsSyncingFarBehind(0) {
 		t.Fatal("a minority claim must not stop template serving")
 	}
@@ -271,8 +277,8 @@ func TestDialedMajorityCountsAsBehindFromTheStart(t *testing.T) {
 	sm := newClaimTestManager(t, local, SyncConfig{GetStatus: func() ChainStatus { return claimStatus(10, 100) }})
 	sm.checkSync()
 	waitForCondition(t, "the sync run to start", sm.IsSyncing)
-	if !sm.IsSyncingFarBehind(4989) || sm.IsSyncingFarBehind(4990) {
-		t.Fatal("the node should count as 4990 blocks behind")
+	if got := sm.BlocksBehind(); got != 4990 {
+		t.Fatalf("blocks behind = %d, want 4990", got)
 	}
 	if !sm.IsSyncingFarBehind(2) {
 		t.Fatal("a node most of its chosen peers are ahead of must stop serving templates")
