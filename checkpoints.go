@@ -19,7 +19,7 @@ const (
 	checkpointsFilename = "checkpoints.dat"
 
 	// DefaultCheckpointsURL is where nodes fetch checkpoints when not in --full-sync mode.
-	// The file is served from a web host and is append-only.
+	// The file is served from a web host and contains finalized canonical blocks.
 	DefaultCheckpointsURL = "https://bntpool.com/checkpoints.dat"
 
 	// Keep downloads bounded in case of a misconfigured URL.
