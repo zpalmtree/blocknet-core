@@ -2821,6 +2821,15 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	// Get mempool transactions sorted by fee rate together with the exact
 	// generation represented by this selection.
 	txs, mempoolGeneration := s.daemon.Mempool().GetTransactionsForBlockSnapshot(MaxBlockSize-1000, 1000)
+	header := BlockHeader{
+		Version:    1,
+		Height:     tp.Height,
+		PrevHash:   tp.PrevHash,
+		Timestamp:  time.Now().Unix(),
+		Difficulty: tp.Difficulty,
+		Nonce:      0,
+	}
+	txs = trimTransactionsToJSONBudget(header, coinbase.Tx, txs, blockTemplateJSONBudget)
 	merkleStartedAt := time.Now()
 
 	// Build transaction list (coinbase first)
@@ -2830,14 +2839,7 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 
 	// Build block template (nonce = 0, to be solved by pool miners)
 	block := &Block{
-		Header: BlockHeader{
-			Version:    1,
-			Height:     tp.Height,
-			PrevHash:   tp.PrevHash,
-			Timestamp:  time.Now().Unix(),
-			Difficulty: tp.Difficulty,
-			Nonce:      0,
-		},
+		Header:       header,
 		Transactions: allTxs,
 	}
 
