@@ -806,7 +806,11 @@ func (s *APIServer) handleSends(w http.ResponseWriter, r *http.Request) {
 	for _, view := range pageViews {
 		pageTxIDs = append(pageTxIDs, view.record.TxID)
 	}
-	txStates := s.walletSendChainStates(pageTxIDs, chainHeight)
+	txStates, err := s.walletSendChainStates(pageTxIDs, chainHeight)
+	if err != nil {
+		writeInternal(w, r, http.StatusInternalServerError, "unable to read transaction status", err)
+		return
+	}
 
 	sends := make([]sendEntry, 0, end-start)
 	for _, view := range pageViews {
@@ -1170,6 +1174,7 @@ func (s *APIServer) handleIdempotentSendStatus(w http.ResponseWriter, r *http.Re
 // handleSend builds and broadcasts a transaction.
 // POST /api/wallet/send
 func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
+	requestStarted := time.Now()
 	if !s.requireWallet(w, r) {
 		return
 	}
@@ -1230,12 +1235,6 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 				s.sendIdem.abandon(cacheKey)
 			}
 		}()
-	}
-
-	ip := clientIP(r)
-	if !s.sendLimiter.allow(ip) {
-		writeError(w, http.StatusTooManyRequests, "send rate limit exceeded")
-		return
 	}
 
 	select {
@@ -1323,19 +1322,25 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	builder := s.createTxBuilder()
+	buildTimings := &walletTxBuildTimings{}
+	builder := s.createTxBuilderWithTimings(buildTimings)
+	buildStarted := time.Now()
 	result, err := builder.Transfer(toWalletRecipients(validated), sendFeePerByte, height)
+	buildDuration := time.Since(buildStarted)
 	if err != nil {
 		writeSendError(w, r, err)
 		return
 	}
 
+	submitStarted := time.Now()
 	if err := s.daemon.SubmitTransaction(result.TxData); err != nil {
 		s.wallet.ReleaseInputLease(result.InputLease)
 		writeSendError(w, r, err)
 		return
 	}
+	submitDuration := time.Since(submitStarted)
 
+	bookkeepingStarted := time.Now()
 	for _, spent := range result.SpentOutputs {
 		s.wallet.MarkSpentByTx(spent.OneTimePubKey, result.TxID)
 	}
@@ -1350,9 +1355,37 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	if result.Change > 0 {
 		s.wallet.AddPendingCredit(result.TxID, result.Change)
 	}
+	bookkeepingDuration := time.Since(bookkeepingStarted)
+
+	saveStarted := time.Now()
 	if err := s.wallet.Save(); err != nil {
 		log.Printf("Warning: wallet persistence failed after send %x: %v", result.TxID, err)
 	}
+	saveDuration := time.Since(saveStarted)
+
+	log.Printf(
+		"wallet send completed tx=%x recipients=%d inputs=%d amount=%d fee=%d change=%d duration_ms=%d build_ms=%d submit_ms=%d bookkeeping_ms=%d save_ms=%d ring_select_ms=%d ring_select_count=%d ring_sign_ms=%d ring_sign_count=%d range_proof_ms=%d range_proof_count=%d commitment_ms=%d commitment_count=%d txid_ms=%d",
+		result.TxID,
+		len(validated),
+		len(result.SpentOutputs),
+		totalSend,
+		result.Fee,
+		result.Change,
+		time.Since(requestStarted).Milliseconds(),
+		buildDuration.Milliseconds(),
+		submitDuration.Milliseconds(),
+		bookkeepingDuration.Milliseconds(),
+		saveDuration.Milliseconds(),
+		buildTimings.ringSelectDuration.Milliseconds(),
+		buildTimings.ringSelectCount,
+		buildTimings.ringSignDuration.Milliseconds(),
+		buildTimings.ringSignCount,
+		buildTimings.rangeProofDuration.Milliseconds(),
+		buildTimings.rangeProofCount,
+		buildTimings.commitmentDuration.Milliseconds(),
+		buildTimings.commitmentCount,
+		buildTimings.txIDDuration.Milliseconds(),
+	)
 
 	resp := map[string]any{
 		"txid":       fmt.Sprintf("%x", result.TxID),
@@ -1379,6 +1412,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 // handleSendAdvanced builds a transaction using caller-specified inputs (coin control).
 // POST /api/wallet/send/advanced
 func (s *APIServer) handleSendAdvanced(w http.ResponseWriter, r *http.Request) {
+	requestStarted := time.Now()
 	if !s.requireWallet(w, r) {
 		return
 	}
@@ -1437,12 +1471,6 @@ func (s *APIServer) handleSendAdvanced(w http.ResponseWriter, r *http.Request) {
 				s.sendIdem.abandon(cacheKey)
 			}
 		}()
-	}
-
-	ip := clientIP(r)
-	if !s.sendLimiter.allow(ip) {
-		writeError(w, http.StatusTooManyRequests, "send rate limit exceeded")
-		return
 	}
 
 	select {
@@ -1508,7 +1536,9 @@ func (s *APIServer) handleSendAdvanced(w http.ResponseWriter, r *http.Request) {
 
 	height := s.daemon.Chain().Height()
 
+	reserveStarted := time.Now()
 	lease, inputs, err := s.wallet.ReserveSpecificInputs(refs, height, 2*time.Minute)
+	reserveDuration := time.Since(reserveStarted)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1558,19 +1588,25 @@ func (s *APIServer) handleSendAdvanced(w http.ResponseWriter, r *http.Request) {
 	}
 
 	releaseLease = false
-	builder := s.createTxBuilder()
+	buildTimings := &walletTxBuildTimings{}
+	builder := s.createTxBuilderWithTimings(buildTimings)
+	buildStarted := time.Now()
 	result, err := builder.TransferWithInputs(inputs, lease, toWalletRecipients(validated), sendFeePerByte, changeSplit, height)
+	buildDuration := time.Since(buildStarted)
 	if err != nil {
 		writeSendError(w, r, err)
 		return
 	}
 
+	submitStarted := time.Now()
 	if err := s.daemon.SubmitTransaction(result.TxData); err != nil {
 		s.wallet.ReleaseInputLease(result.InputLease)
 		writeSendError(w, r, err)
 		return
 	}
+	submitDuration := time.Since(submitStarted)
 
+	bookkeepingStarted := time.Now()
 	for _, spent := range result.SpentOutputs {
 		s.wallet.MarkSpentByTx(spent.OneTimePubKey, result.TxID)
 	}
@@ -1585,9 +1621,39 @@ func (s *APIServer) handleSendAdvanced(w http.ResponseWriter, r *http.Request) {
 	if result.Change > 0 {
 		s.wallet.AddPendingCredit(result.TxID, result.Change)
 	}
+	bookkeepingDuration := time.Since(bookkeepingStarted)
+
+	saveStarted := time.Now()
 	if err := s.wallet.Save(); err != nil {
 		log.Printf("Warning: wallet persistence failed after send %x: %v", result.TxID, err)
 	}
+	saveDuration := time.Since(saveStarted)
+
+	log.Printf(
+		"wallet advanced send completed tx=%x recipients=%d inputs=%d amount=%d fee=%d change=%d change_split=%d duration_ms=%d reserve_ms=%d build_ms=%d submit_ms=%d bookkeeping_ms=%d save_ms=%d ring_select_ms=%d ring_select_count=%d ring_sign_ms=%d ring_sign_count=%d range_proof_ms=%d range_proof_count=%d commitment_ms=%d commitment_count=%d txid_ms=%d",
+		result.TxID,
+		len(validated),
+		len(inputs),
+		totalSend,
+		result.Fee,
+		result.Change,
+		changeSplit,
+		time.Since(requestStarted).Milliseconds(),
+		reserveDuration.Milliseconds(),
+		buildDuration.Milliseconds(),
+		submitDuration.Milliseconds(),
+		bookkeepingDuration.Milliseconds(),
+		saveDuration.Milliseconds(),
+		buildTimings.ringSelectDuration.Milliseconds(),
+		buildTimings.ringSelectCount,
+		buildTimings.ringSignDuration.Milliseconds(),
+		buildTimings.ringSignCount,
+		buildTimings.rangeProofDuration.Milliseconds(),
+		buildTimings.rangeProofCount,
+		buildTimings.commitmentDuration.Milliseconds(),
+		buildTimings.commitmentCount,
+		buildTimings.txIDDuration.Milliseconds(),
+	)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"txid":         fmt.Sprintf("%x", result.TxID),
@@ -1653,6 +1719,7 @@ func (s *APIServer) handleUnloadWallet(w http.ResponseWriter, r *http.Request) {
 	s.cli.passwordHash = [32]byte{}
 	s.cli.passwordHashSet = false
 	s.cli.mu.Unlock()
+	s.cli.waitForWalletScans()
 
 	writeJSON(w, http.StatusOK, map[string]any{"unloaded": true})
 }
@@ -2938,6 +3005,15 @@ func (s *APIServer) handleSubmitBlock(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePerfLatency returns process-lifetime block-path latency histograms
+// (submit, gossip, ProcessBlock stages, template builds, SSE delivery).
+// GET /api/perf/latency
+func (s *APIServer) handlePerfLatency(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"families": s.daemon.LatencySnapshot(),
+	})
+}
+
 // handleMiningThreads sets the mining thread count.
 // POST /api/mining/threads
 func (s *APIServer) handleMiningThreads(w http.ResponseWriter, r *http.Request) {
@@ -2980,61 +3056,44 @@ func (s *APIServer) catchUpScan() {
 	}
 
 	ctx := s.cli.ctx
+	mu := &s.cli.walletScanMu
 
-	if removed := rewindWalletToCanonicalTip(w, s.daemon.Chain()); removed > 0 {
-		if err := w.Save(); err != nil {
+	mu.Lock()
+	removed := rewindWalletToCanonicalTip(w, s.daemon.Chain())
+	mu.Unlock()
+	if removed > 0 {
+		if err := s.cli.saveScannedWallet(w); err != nil {
 			log.Printf("Warning: catchUpScan reorg save: %v", err)
 		}
 	}
 
-	walletHeight := w.SyncedHeight()
-	chainHeight := s.daemon.Chain().Height()
-	if walletHeight >= chainHeight {
-		return
-	}
-
-	for h := walletHeight + 1; h <= chainHeight; h++ {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		block := s.daemon.Chain().GetBlockByHeight(h)
-		if block == nil {
-			break
-		}
-		_, walletHash := w.SyncedBlock()
-		if walletSyncHashKnown(walletHash) && block.Header.PrevHash != walletHash {
-			if h <= 1 {
-				break
+	// While this runs the live block loop skips scanning; every step goes
+	// through syncWalletStep under walletScanMu and re-reads the chain tip, so
+	// blocks arriving meanwhile are picked up here. It stops once the wallet
+	// is unloaded or replaced.
+	catchUp := func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
-			if removed := w.RewindToHeight(h - 2); removed > 0 {
-				if err := w.Save(); err != nil {
-					log.Printf("Warning: catchUpScan reorg save at height %d: %v", h, err)
+			if !s.cli.scanWalletStep(w, sc) {
+				return
+			}
+			if h := w.SyncedHeight(); h%100 == 0 || h == s.daemon.Chain().Height() {
+				if err := s.cli.saveScannedWallet(w); err != nil {
+					log.Printf("Warning: catchUpScan save at height %d: %v", h, err)
 				}
 			}
-			h = w.SyncedHeight()
-			continue
-		}
-		sc.ScanBlock(blockToScanData(block))
-		w.ReconcileUnconfirmedSpends(func(txID [32]byte) bool {
-			return s.daemon.Mempool().HasTransaction(txID)
-		})
-		blockHash := block.Hash()
-		w.SetSyncedBlock(h, blockHash)
-
-		if h%100 == 0 || h == chainHeight {
-			if err := w.Save(); err != nil {
-				log.Printf("Warning: catchUpScan save at height %d: %v", h, err)
-			}
-		}
-
-		// Re-read chain height in case new blocks arrived during scan
-		if h == chainHeight {
-			chainHeight = s.daemon.Chain().Height()
 		}
 	}
+	s.cli.walletCatchUps.Add(1)
+	catchUp()
+	s.cli.walletCatchUps.Add(-1)
+	// A block the live loop skipped just before the count dropped is scanned
+	// here; later blocks are the live loop's again.
+	catchUp()
 }
 
 // ============================================================================
@@ -3286,40 +3345,95 @@ type walletSendChainState struct {
 	inMempool     bool
 }
 
-func (s *APIServer) walletSendChainStates(txIDs [][32]byte, chainHeight uint64) map[[32]byte]walletSendChainState {
+func (s *APIServer) walletSendChainStates(txIDs [][32]byte, chainHeight uint64) (map[[32]byte]walletSendChainState, error) {
 	states := make(map[[32]byte]walletSendChainState, len(txIDs))
-	pending := make(map[[32]byte]struct{}, len(txIDs))
-
-	for _, txID := range txIDs {
-		if s.daemon.Mempool().HasTransaction(txID) {
-			states[txID] = walletSendChainState{chainState: "mempool", inMempool: true}
-			continue
+	pending := make([][32]byte, 0, len(txIDs))
+	for _, id := range txIDs {
+		if s.daemon.Mempool().HasTransaction(id) {
+			states[id] = walletSendChainState{chainState: "mempool", inMempool: true}
+		} else {
+			pending = append(pending, id)
 		}
-		pending[txID] = struct{}{}
 	}
-
-	for txID, height := range s.daemon.Chain().FindTxHeights(pending) {
-		confirmations := uint64(0)
-		if chainHeight >= height {
-			confirmations = chainHeight - height + 1
+	confirmed := map[[32]byte]uint64{}
+	if storage := s.daemon.Chain().Storage(); storage != nil && len(pending) > 0 {
+		var err error
+		confirmed, err = storage.CanonicalTransactionHeights(pending)
+		if err != nil {
+			return nil, err
 		}
-		states[txID] = walletSendChainState{
-			chainState:    "confirmed",
-			confirmations: confirmations,
+	}
+	for _, id := range pending {
+		if height, ok := confirmed[id]; ok && height <= chainHeight {
+			states[id] = walletSendChainState{chainState: "confirmed", confirmations: chainHeight - height + 1}
+		} else {
+			states[id] = walletSendChainState{chainState: "not_found"}
 		}
-		delete(pending, txID)
 	}
+	return states, nil
+}
 
-	for txID := range pending {
-		states[txID] = walletSendChainState{chainState: "not_found"}
+type walletTxBuildTimings struct {
+	ringSelectDuration time.Duration
+	ringSelectCount    int
+	ringSignDuration   time.Duration
+	ringSignCount      int
+	rangeProofDuration time.Duration
+	rangeProofCount    int
+	commitmentDuration time.Duration
+	commitmentCount    int
+	txIDDuration       time.Duration
+}
+
+func (t *walletTxBuildTimings) recordRingSelect(start time.Time) {
+	if t == nil {
+		return
 	}
-	return states
+	t.ringSelectDuration += time.Since(start)
+	t.ringSelectCount++
+}
+
+func (t *walletTxBuildTimings) recordRingSign(start time.Time) {
+	if t == nil {
+		return
+	}
+	t.ringSignDuration += time.Since(start)
+	t.ringSignCount++
+}
+
+func (t *walletTxBuildTimings) recordRangeProof(start time.Time) {
+	if t == nil {
+		return
+	}
+	t.rangeProofDuration += time.Since(start)
+	t.rangeProofCount++
+}
+
+func (t *walletTxBuildTimings) recordCommitment(start time.Time) {
+	if t == nil {
+		return
+	}
+	t.commitmentDuration += time.Since(start)
+	t.commitmentCount++
+}
+
+func (t *walletTxBuildTimings) recordTxID(start time.Time) {
+	if t == nil {
+		return
+	}
+	t.txIDDuration += time.Since(start)
 }
 
 // createTxBuilder creates a transaction builder wired to the daemon (same as CLI).
 func (s *APIServer) createTxBuilder() *wallet.Builder {
+	return s.createTxBuilderWithTimings(nil)
+}
+
+func (s *APIServer) createTxBuilderWithTimings(timings *walletTxBuildTimings) *wallet.Builder {
 	cfg := wallet.TransferConfig{
 		SelectRingMembers: func(realPubKey, realCommitment [32]byte) (keys, commitments [][32]byte, secretIndex int, err error) {
+			started := time.Now()
+			defer timings.recordRingSelect(started)
 			ringData, err := s.daemon.Chain().SelectRingMembersWithCommitments(realPubKey, realCommitment)
 			if err != nil {
 				return nil, nil, 0, err
@@ -3327,10 +3441,14 @@ func (s *APIServer) createTxBuilder() *wallet.Builder {
 			return ringData.Keys, ringData.Commitments, ringData.SecretIndex, nil
 		},
 		CreateCommitment: func(amount uint64, blinding [32]byte) [32]byte {
+			started := time.Now()
+			defer timings.recordCommitment(started)
 			commitment, _ := CreatePedersenCommitmentWithBlinding(amount, blinding)
 			return commitment
 		},
 		CreateRangeProof: func(amount uint64, blinding [32]byte) ([]byte, error) {
+			started := time.Now()
+			defer timings.recordRangeProof(started)
 			proof, err := CreateRangeProof(amount, blinding)
 			if err != nil {
 				return nil, err
@@ -3338,6 +3456,8 @@ func (s *APIServer) createTxBuilder() *wallet.Builder {
 			return proof.Proof, nil
 		},
 		SignRingCT: func(ringKeys, ringCommitments [][32]byte, secretIndex int, privateKey, realBlinding, pseudoCommitment, pseudoBlinding [32]byte, message []byte) ([]byte, [32]byte, error) {
+			started := time.Now()
+			defer timings.recordRingSign(started)
 			sig, err := SignRingCT(ringKeys, ringCommitments, secretIndex, privateKey, realBlinding, pseudoCommitment, pseudoBlinding, message)
 			if err != nil {
 				return nil, [32]byte{}, err
@@ -3349,6 +3469,8 @@ func (s *APIServer) createTxBuilder() *wallet.Builder {
 			return blinding
 		},
 		ComputeTxID: func(txData []byte) ([32]byte, error) {
+			started := time.Now()
+			defer timings.recordTxID(started)
 			tx, err := DeserializeTx(txData)
 			if err != nil {
 				return [32]byte{}, err
@@ -3379,10 +3501,4 @@ func (s *APIServer) createTxBuilder() *wallet.Builder {
 	}
 
 	return wallet.NewBuilder(s.wallet, cfg)
-}
-
-func (s *APIServer) handlePerfLatency(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"families": s.daemon.LatencySnapshot(),
-	})
 }

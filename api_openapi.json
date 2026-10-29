@@ -20,6 +20,500 @@
     }
   ],
   "paths": {
+    "/api/wallet-feed/params": {
+      "get": {
+        "operationId": "getWalletFeedParams",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Ring, fee and maturity parameters for external signers",
+        "responses": {
+          "200": {
+            "description": "Parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "network": {
+                      "type": "string",
+                      "enum": [
+                        "mainnet",
+                        "testnet"
+                      ]
+                    },
+                    "ring_size": {
+                      "type": "integer"
+                    },
+                    "min_fee": {
+                      "type": "integer"
+                    },
+                    "fee_per_byte": {
+                      "type": "integer"
+                    },
+                    "indexed_derivation_height": {
+                      "type": "integer"
+                    },
+                    "coinbase_maturity": {
+                      "type": "integer"
+                    },
+                    "safe_confirmations": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/wallet-feed/ring-members": {
+      "post": {
+        "operationId": "postWalletFeedRingMembers",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Canonical decoys for real inputs, selected as the in-daemon wallet does",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "inputs"
+                ],
+                "properties": {
+                  "inputs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "public_key": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "commitment": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One ring per input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "keys": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[0-9a-f]{64}$"
+                            }
+                          },
+                          "commitments": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[0-9a-f]{64}$"
+                            }
+                          },
+                          "secret_index": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed inputs"
+          },
+          "409": {
+            "description": "Ring selection failed"
+          }
+        }
+      }
+    },
+    "/api/wallet-feed/key-images": {
+      "post": {
+        "operationId": "postWalletFeedKeyImages",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Canonical and mempool spend status of key images",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "key_images"
+                ],
+                "properties": {
+                  "key_images": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status per key image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key_images": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key_image": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "spent": {
+                            "type": "boolean"
+                          },
+                          "height": {
+                            "type": "integer",
+                            "description": "Height of the block that spent it; present only when spent"
+                          },
+                          "in_mempool": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed key images"
+          }
+        }
+      }
+    },
+    "/api/wallet-feed/submit": {
+      "post": {
+        "operationId": "postWalletFeedSubmit",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Submit a signed transaction (idempotent)",
+        "description": "Validates and relays the exact bytes. Resubmitting a transaction already in the mempool or on the canonical chain returns 200 with status `mempool` or `canonical`. 422 means these bytes were rejected; 503 means the mempool is full (retry).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tx"
+                ],
+                "properties": {
+                  "tx": {
+                    "type": "string",
+                    "description": "Serialized transaction, hex, at most 1 MiB"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted or already known",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tx_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "mempool",
+                        "canonical"
+                      ]
+                    },
+                    "height": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body"
+          },
+          "422": {
+            "description": "Rejected"
+          },
+          "503": {
+            "description": "Mempool full"
+          }
+        }
+      }
+    },
+    "/api/wallet-feed/blocks": {
+      "get": {
+        "operationId": "getWalletFeedBlocks",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Canonical scan data for external wallet services",
+        "description": "Returns up to `limit` canonical blocks starting at `from`, with every transaction's scan fields (tx public key, outputs, key images). All blocks and `tip` come from one consistent canonical snapshot, so each block's `prev_hash` links to the previous block. `from` above the tip returns an empty `blocks` array. Read-only; used by the hosted wallet service.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feed page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tip": {
+                      "type": "object",
+                      "properties": {
+                        "height": {
+                          "type": "integer"
+                        },
+                        "hash": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      }
+                    },
+                    "blocks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "height": {
+                            "type": "integer"
+                          },
+                          "hash": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "prev_hash": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "timestamp": {
+                            "type": "integer"
+                          },
+                          "transactions": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/WalletFeedTx"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed `from` or `limit` outside 1..100"
+          }
+        }
+      }
+    },
+    "/api/wallet-feed/tx/{txid}": {
+      "get": {
+        "operationId": "getWalletFeedTx",
+        "tags": [
+          "Wallet feed"
+        ],
+        "summary": "Where a transaction is, with its scan data",
+        "description": "`status` is `mempool`, `canonical` (with `height` and `block_hash`) or `unknown` (200 with no `tx`).",
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "mempool",
+                        "canonical",
+                        "unknown"
+                      ]
+                    },
+                    "height": {
+                      "type": "integer"
+                    },
+                    "block_hash": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "tx": {
+                      "$ref": "#/components/schemas/WalletFeedTx"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "txid is not 64 hex characters"
+          }
+        }
+      }
+    },
+    "/api/perf/latency": {
+      "get": {
+        "operationId": "getPerfLatency",
+        "tags": [
+          "Mining"
+        ],
+        "summary": "Block-path latency histograms",
+        "description": "Process-lifetime latency histograms for the block pipeline, keyed by family and then stage lane. Families: `daemon_submit_block` (POST /api/mining/submitblock stages), `daemon_peer_block` (gossiped blocks from receipt to relay), `daemon_process_block` (ProcessBlock stages prefixed by source: submit, gossip or sync), `daemon_block_template` (template build stages) and `daemon_events` (new_block SSE delivery). Bucket bounds match blocknet-pool monitor histograms.",
+        "responses": {
+          "200": {
+            "description": "Latency histograms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "families": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "bounds_millis": {
+                              "type": "array",
+                              "items": {
+                                "type": "integer"
+                              },
+                              "description": "Inclusive bucket upper bounds in milliseconds"
+                            },
+                            "counts": {
+                              "type": "array",
+                              "items": {
+                                "type": "integer"
+                              },
+                              "description": "Per-bucket (not cumulative) counts; the extra last entry is +Inf"
+                            },
+                            "sum_micros": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "families": {
+                    "daemon_submit_block": {
+                      "total": {
+                        "bounds_millis": [
+                          1,
+                          2,
+                          5
+                        ],
+                        "counts": [
+                          0,
+                          0,
+                          3,
+                          1
+                        ],
+                        "sum_micros": 20500
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/settings": {
       "get": {
         "operationId": "getSettings",
@@ -3849,6 +4343,59 @@
       }
     },
     "schemas": {
+      "WalletFeedTx": {
+        "type": "object",
+        "properties": {
+          "tx_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "tx_public_key": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "is_coinbase": {
+            "type": "boolean",
+            "description": "Transaction index 0 in a block above genesis"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "description": "Position in the transaction's outputs"
+                },
+                "public_key": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "commitment": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "encrypted_amount": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{16}$"
+                },
+                "encrypted_memo": {
+                  "type": "string",
+                  "description": "Fixed-size encrypted memo, hex"
+                }
+              }
+            }
+          },
+          "key_images": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Input key images in order"
+          }
+        }
+      },
       "Settings": {
         "type": "object",
         "properties": {
