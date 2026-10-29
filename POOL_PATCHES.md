@@ -45,13 +45,25 @@ then reconcile by content on the next upstream update.
 The unrelated explorer layout patch was reverted in `c8fbba9`.
 
 [#62: reusable PoW memory and Linux huge pages](https://github.com/blocknetprivacy/core/pull/62)
-is a separate, independent memory-management patch using upstream's existing
+was merged as `b819f23`. It is an independent memory-management patch using upstream's existing
 RustCrypto Argon2 implementation. It retains at most one idle 2 GiB buffer.
 It passed 27 Rust tests, explicit production-size reference comparisons, the
 full Go race suite and `go vet`. The benchmark harness and raw results are
 included in that PR; local evidence is in `experiments/pow-upstream-20261029`.
-Adopting the optimized kernel is a [separate proposal](https://github.com/blocknetprivacy/core/pull/62#issuecomment-6488580804),
-pending agreement on package ownership, distribution and cross-CPU verification.
+The [shared package approach was approved](https://github.com/blocknetprivacy/core/pull/62#issuecomment-6488715224).
+[#63: shared optimized PoW kernel](https://github.com/blocknetprivacy/core/pull/63)
+is based on `b819f23` and pins the standalone
+[blocknet-pow-kernel](https://github.com/zpalmtree/blocknet-pow-kernel) package at
+`9f5d0b79d0cc4c169cd112443c524bb4bb946627`. The daemon change is three files
+(+36/-18), retaining upstream's one-buffer cache. Full 2 GiB reference vectors
+passed on Linux x86-64/ARM64, Windows x86-64 and macOS ARM64; local tests also
+covered all AVX-512 variants. The daemon passed 28 Rust tests, the explicit
+production reference test, the full Go race suite and `go vet`.
+Median hash time on a Ryzen 9950X3D/WSL2 fell from 924 ms to 482 ms against
+current upstream (same Rust 1.93.0 build settings, 30 matching hashes).
+Evidence is in `experiments/shared-pow-kernel-20261029`. No production services
+were deployed or restarted, and no package registry release or release tag was
+created. Reconcile the existing pool kernel patch by content when #63 lands.
 
 ## Verification
 
