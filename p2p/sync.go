@@ -43,6 +43,8 @@ const (
 	syncHedgeMax       = 3 * time.Second
 	syncHedgePeers     = 3
 	syncGiveUpAfter    = 2 * time.Minute
+	// syncProtectTag marks peers an active sync run downloads from.
+	syncProtectTag = "sync"
 )
 
 const (
@@ -729,6 +731,8 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 	sm.downloadBuffer = make(map[uint64]DownloadedBlock) // Reset buffer
 	sm.mu.Unlock()
 
+	defer sm.protectSyncPeers(peers)()
+
 	defer func() {
 		sm.mu.Lock()
 		sm.syncing = false
@@ -941,6 +945,24 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 			case <-sm.ctx.Done():
 			}
 		}()
+	}
+}
+
+// protectSyncPeers keeps the connection manager from trimming the peers a
+// sync run downloads from (losing one mid-run stalls the run until it gives
+// up) and returns the function that releases them.
+func (sm *SyncManager) protectSyncPeers(peers []PeerStatus) func() {
+	if sm.node == nil || sm.node.host == nil {
+		return func() {}
+	}
+	connMgr := sm.node.host.ConnManager()
+	for _, ps := range peers {
+		connMgr.Protect(ps.Peer, syncProtectTag)
+	}
+	return func() {
+		for _, ps := range peers {
+			connMgr.Unprotect(ps.Peer, syncProtectTag)
+		}
 	}
 }
 
