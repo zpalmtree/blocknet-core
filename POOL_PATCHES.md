@@ -25,6 +25,8 @@ These code commits are replayed directly on that upstream base:
 | `98b8cec` | Background PoW memory warm-up and verification benchmark helper | Pool-specific |
 | `ede0268` | Keep block templates within the peer block-announcement size | Candidate for upstream with a larger announcement limit |
 | `71be1be` | Report syncing only when behind the sync target, plus `sync_in_progress` and `blocks_behind` | Candidate for upstream |
+| `1ab3618` | Accept new-block announcements up to 6 MiB | Upstream PR [#68](https://github.com/blocknetprivacy/core/pull/68) |
+| (this refresh) | Template cap pinned to the 2 MiB limit older nodes enforce; sync-run peers protected from connection trimming | Pool-specific / candidate for upstream |
 
 ## Reconciliation
 
