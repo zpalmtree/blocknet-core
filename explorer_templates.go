@@ -178,8 +178,7 @@ body.adv td.ad,body.adv th.ad{display:table-cell!important}
 .sboard .note{font-size:12px;color:var(--mu)}
 .sboard .big{color:#fff;letter-spacing:-1px;line-height:1;font-variant-numeric:tabular-nums}
 .sboard .v small{font-size:12px;color:var(--mu);margin-left:3px}
-.sboard .stat-value{font-size:34px;margin-top:6px;overflow-wrap:anywhere}
-@media(max-width:860px){.sboard .g4{grid-template-columns:repeat(2,minmax(0,1fr))}.sboard .stat-value{font-size:clamp(18px,5vw,28px)}}
+@media(max-width:860px){.sboard .g4{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .notice{border-bottom:1px solid #2a1d00;background:#0d0800;color:#c80;font-size:12px;line-height:1.5}
 .notice .wrap{padding-top:8px;padding-bottom:8px;display:flex;gap:10px;align-items:baseline}
 .notice b{color:#fa0;font-weight:normal;white-space:nowrap}
@@ -661,14 +660,14 @@ const explorerStatsTmpl = `<!DOCTYPE html>
 <div class="crumb"><a href="/">blocks</a> / stats</div>
 <div class="vh"><div class="ttl"><div class="big" style="font-size:56px">network</div><div class="slot"><canvas data-gyroid="900" aria-hidden="true"></canvas></div></div><div class="cnow">hover a chart for values</div></div>
 <div class="g g4">
-<div class="card"><div class="k">height</div><div class="big stat-value" id="stat-height">{{.Height}}</div></div>
-<div class="card"><div class="k">hashrate</div><div class="big stat-value">{{.Hashrate}}<small style="font-size:14px;color:var(--mu)"> H/s</small></div></div>
-<div class="card"><div class="k">difficulty</div><div class="big stat-value" id="stat-difficulty">{{.Difficulty}}</div></div>
-<div class="card"><div class="k">avg block time</div><div class="big stat-value">{{.AvgBlockTime}}<small style="font-size:14px;color:var(--mu)"> s</small></div></div>
-<div class="card"><div class="k">window transactions</div><div class="big stat-value">{{.TotalTx}}</div></div>
-<div class="card"><div class="k">coins emitted</div><div class="big stat-value">{{.Emitted}}</div></div>
-<div class="card"><div class="k">emission progress</div><div class="big stat-value">{{.PctEmitted}}<small style="font-size:14px;color:var(--mu)"> %</small></div></div>
-<div class="card"><div class="k">peers</div><div class="big stat-value">{{.Peers}}</div></div>
+<div class="card"><div class="k">height</div><div class="big" style="font-size:34px;margin-top:6px" id="stat-height">{{.Height}}</div></div>
+<div class="card"><div class="k">hashrate</div><div class="big" style="font-size:34px;margin-top:6px">{{.Hashrate}}<small style="font-size:14px;color:var(--mu)"> H/s</small></div></div>
+<div class="card"><div class="k">difficulty</div><div class="big" style="font-size:34px;margin-top:6px" id="stat-difficulty">{{.Difficulty}}</div></div>
+<div class="card"><div class="k">avg block time</div><div class="big" style="font-size:34px;margin-top:6px">{{.AvgBlockTime}}<small style="font-size:14px;color:var(--mu)"> s</small></div></div>
+<div class="card"><div class="k">window transactions</div><div class="big" style="font-size:34px;margin-top:6px">{{.TotalTx}}</div></div>
+<div class="card"><div class="k">coins emitted</div><div class="big" style="font-size:34px;margin-top:6px">{{.Emitted}}</div></div>
+<div class="card"><div class="k">emission progress</div><div class="big" style="font-size:34px;margin-top:6px">{{.PctEmitted}}<small style="font-size:14px;color:var(--mu)"> %</small></div></div>
+<div class="card"><div class="k">peers</div><div class="big" style="font-size:34px;margin-top:6px">{{.Peers}}</div></div>
 </div>
 <div class="g g4 mt" id="cards"></div>
 </main>

@@ -12,7 +12,7 @@ The production branch remains `pool`.
 | `8d67849` | Atomic finalized checkpoint publication |
 | `81c6635` | Block-path diagnostics and SSE timing on upstream's lock-free tip cache; preverification is included in elapsed time |
 | `91fdb56` | Authenticated external-wallet feeds, wallet export, send handling and serialized wallet scanning/unload |
-| `e942787` | Responsive explorer statistics that fit narrow screens |
+| `07fbe40` | Hugepage-backed PoW memory, startup warm-up and updated shared kernel |
 
 Each commit builds on the preceding commits. For the next upstream update,
 create a temporary worktree from the new upstream master and cherry-pick only
@@ -35,12 +35,6 @@ client API tests (18 and 21 tests respectively). The audit covered template
 leases, compact/full block submission, cookie authentication, SSE and wallet
 send responses. Existing daemon startup flags are accepted by upstream's
 settings migration; settings are persisted in `settings.json`.
-
-The explorer showcase is kept at the workspace path
-`experiments/core-upstream-showcase/index.html`, outside the source repository.
-It uses the real explorer handlers with synthetic chain data, captured through
-the configured Playwright MCP at desktop and mobile widths. Run that folder's
-`serve.sh` to view it at `http://localhost:18765`.
 
 ## Deployment
 
