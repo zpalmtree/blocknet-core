@@ -105,6 +105,7 @@ func (r *latencyRecorder) observeProcessBlock(source string, t processBlockTimin
 	if t.Preverify > 0 {
 		r.Observe(latencyFamilyProcessBlock, source+"_preverify", t.Preverify)
 	}
+	r.Observe(latencyFamilyProcessBlock, source+"_lock_wait", t.LockWait)
 	r.Observe(latencyFamilyProcessBlock, source+"_validate", t.Validate)
 	if !t.Detail.SkipPoW {
 		r.Observe(latencyFamilyProcessBlock, source+"_pow", t.Detail.PoW)

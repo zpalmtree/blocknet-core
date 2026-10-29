@@ -146,9 +146,12 @@ func (c *Chain) setProcessBlockStage(
 // processBlockTimings is the stage breakdown of one ProcessBlock call.
 type processBlockTimings struct {
 	Preverify time.Duration
-	Validate  time.Duration
-	Reorg     time.Duration
-	Commit    time.Duration
-	Total     time.Duration
-	Detail    validationTimingBreakdown
+	// LockWait is the wait for the chain lock after preverify, before
+	// validation starts.
+	LockWait time.Duration
+	Validate time.Duration
+	Reorg    time.Duration
+	Commit   time.Duration
+	Total    time.Duration
+	Detail   validationTimingBreakdown
 }

@@ -2004,7 +2004,9 @@ func (c *Chain) ProcessPreverifiedBlockTimed(block *Block, preverification Block
 	preverifyDuration := preverification.Duration
 	hash := block.Hash()
 	preverified := preverification.Verified
+	lockStartedAt := time.Now()
 	c.mu.Lock()
+	lockWaitDuration := time.Since(lockStartedAt)
 	defer c.mu.Unlock()
 
 	currentStage := "validate"
@@ -2027,6 +2029,7 @@ func (c *Chain) ProcessPreverifiedBlockTimed(block *Block, preverification Block
 		total := time.Since(startedAt)
 		timings = processBlockTimings{
 			Preverify: preverifyDuration,
+			LockWait:  lockWaitDuration,
 			Validate:  validateDuration,
 			Reorg:     reorgDuration,
 			Commit:    commitDuration,
