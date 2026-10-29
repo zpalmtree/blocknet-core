@@ -1010,19 +1010,6 @@ func PowHash(header []byte, nonce uint64) ([32]byte, error) {
 	return output, nil
 }
 
-// PowSetCacheEnabled controls idle PoW memory retention for the process.
-// Disabling releases cached memory and makes PowWarm a no-op.
-func PowSetCacheEnabled(enabled bool) error {
-	var value C.uint8_t
-	if enabled {
-		value = 1
-	}
-	if result := C.blocknet_pow_set_cache_enabled(value); result != 0 {
-		return fmt.Errorf("pow cache configuration failed (error %d)", result)
-	}
-	return nil
-}
-
 // PowWarm allocates and faults in one PoW arena so the first block verified
 // after startup doesn't pay for 2GB of page faults. It shares PowHash's
 // bounded cache, which retains at most one idle arena.
