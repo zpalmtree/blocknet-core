@@ -60,7 +60,7 @@ func TestTrimTransactionsToJSONBudgetDropsTheLowestPriorityTail(t *testing.T) {
 }
 
 func TestBlockTemplateJSONBudgetFitsThePeerAnnouncementLimit(t *testing.T) {
-	if blockTemplateJSONBudget <= 0 || blockTemplateJSONBudget >= 2*1024*1024 {
-		t.Fatalf("budget %d must leave headroom under the 2 MiB announcement limit", blockTemplateJSONBudget)
+	if blockTemplateJSONBudget <= 0 || blockTemplateJSONBudget >= legacyBlockAnnouncementLimit {
+		t.Fatalf("budget %d must leave headroom under the %d-byte limit older nodes enforce", blockTemplateJSONBudget, legacyBlockAnnouncementLimit)
 	}
 }
