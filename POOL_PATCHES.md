@@ -26,6 +26,25 @@ merge parent. Fast-forward `pool` to that integration commit and push normally;
 never force-push or rewrite the published branch. An ancestry-only merge is
 appropriate only after the retained changes have all been reconciled and tested.
 
+## Upstream submissions
+
+The following focused PRs are based on upstream master at `14ccd4b`:
+
+- [#58: wallet scan/unload synchronization](https://github.com/blocknetprivacy/core/pull/58)
+- [#59: atomic wallet saves](https://github.com/blocknetprivacy/core/pull/59)
+- [#60: canonical transaction lookups and faster wallet audits](https://github.com/blocknetprivacy/core/pull/60), in two commits
+- [#61: atomic finalized checkpoints](https://github.com/blocknetprivacy/core/pull/61), integrated with upstream's background refresh
+
+Each PR is independent of the others. All five commits also cherry-pick together
+without conflicts. Each branch passed `go test -race ./...` and `go vet ./...`;
+the combined tree passed the focused regression tests under the race detector.
+The PRs contain no external-wallet feed/export APIs or pool send-policy changes.
+Retain the corresponding pool patches until these changes are accepted upstream,
+then reconcile by content on the next upstream update.
+
+The unrelated explorer layout patch was reverted in `c8fbba9`. The PoW kernel
+and hugepage changes have not been proposed in these PRs.
+
 ## Verification
 
 This integration passed the Rust crypto suite (25 tests), full Go tests,
