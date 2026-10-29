@@ -30,6 +30,16 @@ fn pow_kernel() -> &'static FixedArgon2id {
     })
 }
 
+/// Enable or disable retention of idle PoW scratch memory. Enabled by default.
+#[unsafe(no_mangle)]
+pub extern "C" fn blocknet_pow_set_cache_enabled(enabled: u8) -> i32 {
+    let pool = POW_MEMORY.get_or_init(|| MemoryPool::new(pow_kernel().block_count()));
+    match pool.set_cache_enabled(enabled != 0) {
+        Ok(()) => 0,
+        Err(()) => -2,
+    }
+}
+
 /// Fault in one arena using the same bounded cache as block verification.
 #[unsafe(no_mangle)]
 pub extern "C" fn blocknet_pow_warm() -> i32 {

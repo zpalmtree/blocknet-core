@@ -6,6 +6,10 @@ and [#63](https://github.com/blocknetprivacy/core/pull/63) are merged. Their old
 pool implementations have been replaced by upstream's code, including its limit
 of one idle 2 GiB buffer. The kernel dependency and CPU dispatch match upstream.
 
+The additional `--pow-cache=false` startup option disables idle PoW memory
+retention and skips the pool's buffer warm-up. Caching remains enabled by default;
+active hashes still require 2 GiB each. This option is not yet in upstream master.
+
 ## Remaining patch stack
 
 These ten code commits are replayed directly on that upstream base:
