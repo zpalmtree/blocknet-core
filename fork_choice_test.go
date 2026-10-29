@@ -56,7 +56,7 @@ func newForkChoiceTestChain(t *testing.T, tipHeight, difficulty uint64) (*Chain,
 
 func processForkChoiceBlock(t *testing.T, chain *Chain, b *Block) bool {
 	t.Helper()
-	accepted, isMain, err := chain.ProcessPreverifiedBlock(b, BlockPreverification{Verified: true})
+	accepted, isMain, _, err := chain.ProcessPreverifiedBlockTimed(b, BlockPreverification{Verified: true})
 	if err != nil || !accepted {
 		t.Fatalf("block at height %d not accepted: accepted=%v err=%v", b.Header.Height, accepted, err)
 	}

@@ -137,7 +137,8 @@ func TestSubmitBlockHoldsNoLockDuringVerification(t *testing.T) {
 	entered, release, _ := stubPreverify(t, errors.New("invalid proof of work"))
 	done := make(chan error, 1)
 	go func() {
-		done <- f.daemon.SubmitBlock(f.block)
+		_, err := f.daemon.SubmitBlockTimed(f.block)
+		done <- err
 	}()
 	waitEntered(t, entered)
 	if !f.daemon.mu.TryLock() {
@@ -207,7 +208,8 @@ func TestOwnBlockDoesNotWaitForAVerificationSlot(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- f.daemon.SubmitBlock(f.block)
+		_, err := f.daemon.SubmitBlockTimed(f.block)
+		done <- err
 	}()
 	select {
 	case err := <-done:
