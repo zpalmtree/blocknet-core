@@ -3948,6 +3948,13 @@
             "schema": { "type": "string" },
             "description": "Optional reward address override. If provided, the coinbase output pays to this stealth address instead of the loaded wallet address.",
             "example": "3wZc3y1Qw4eYpZtGJxkqkV6xG9c2oXHqfJjQ6b3sR5hYhJ8tZz1qvJ1mY1a9o7hV4pYwqH7xG5d5d8cJ8p4"
+          },
+          {
+            "name": "compact",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["1"] },
+            "description": "When `1`, `block` carries only `header` (no transactions) and `compact` is true. Use it with compact submit (`template_id` + `nonce`); fetch the full block for the same `template_id` from `GET /api/mining/templateblock` while its lease lasts."
           }
         ],
         "responses": {
@@ -4055,6 +4062,34 @@
                 "example": { "error": "internal error" }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/mining/templateblock": {
+      "get": {
+        "operationId": "getTemplateBlock",
+        "tags": ["Mining"],
+        "summary": "Get the full block of a cached template",
+        "description": "Returns the full block (raw consensus form, as in `GET /api/mining/blocktemplate`) for a `template_id` whose lease has not expired, so a pool that fetched the template with `compact=1` can keep the block for a full-block submit.",
+        "parameters": [
+          {
+            "name": "template_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Template id from `GET /api/mining/blocktemplate`.",
+            "example": "7b3d2f4a9d11c8ef"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template block",
+            "content": { "application/json": { "schema": { "type": "object", "description": "Raw consensus block form." } } }
+          },
+          "404": {
+            "description": "Unknown or expired template_id",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           }
         }
       }
@@ -5551,6 +5586,14 @@
             "type": "integer",
             "format": "int64",
             "description": "Exact mempool generation represented by the template transaction selection. Compare with /api/status mempool_generation to detect same-tip content changes."
+          },
+          "compact": {
+            "type": "boolean",
+            "description": "True when `block` was trimmed to its header by `compact=1`."
+          },
+          "tx_count": {
+            "type": "integer",
+            "description": "Transactions in the template block, coinbase included, also when `block` is compact."
           }
         },
         "required": ["block", "target", "header_base", "reward_address_used", "template_id", "template_expires_at_unix_ms", "mempool_generation"]

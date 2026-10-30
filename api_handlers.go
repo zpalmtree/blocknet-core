@@ -2872,8 +2872,19 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	builtAt := time.Now()
+	// ?compact=1 leaves the transactions out: a busy mempool makes the full
+	// block megabytes of JSON, and a pool that submits by template_id only
+	// needs the header. GET /api/mining/templateblock serves the full block
+	// for the same template_id while its lease lasts.
+	var blockField any = block
+	compact := r.URL.Query().Get("compact") == "1"
+	if compact {
+		blockField = map[string]any{"header": block.Header}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"block":                       block,
+		"block":                       blockField,
+		"compact":                     compact,
+		"tx_count":                    len(block.Transactions),
 		"target":                      fmt.Sprintf("%x", target),
 		"header_base":                 fmt.Sprintf("%x", block.Header.SerializeForPoW()),
 		"reward_address_used":         rewardAddrUsed,
@@ -2897,6 +2908,19 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	} {
 		s.daemon.ObserveLatency(latencyFamilyBlockTemplate, l.lane, l.elapsed)
 	}
+}
+
+// handleTemplateBlock returns the full block of a template still in the
+// lease cache, for pools that fetched it with ?compact=1.
+// GET /api/mining/templateblock?template_id=...
+func (s *APIServer) handleTemplateBlock(w http.ResponseWriter, r *http.Request) {
+	templateID := sanitizeInput(r.URL.Query().Get("template_id"))
+	block, ok := s.getMiningTemplate(templateID)
+	if !ok {
+		writeCodedError(w, http.StatusNotFound, "mining_template_unknown", "unknown or expired template_id")
+		return
+	}
+	writeJSON(w, http.StatusOK, block)
 }
 
 // handleRenewBlockTemplate extends the compact-submission lease for a template
