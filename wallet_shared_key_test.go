@@ -110,9 +110,20 @@ func TestWalletTreatsRepeatedOneTimeKeyAsOneCoin(t *testing.T) {
 		t.Errorf("Balance after spend = %d, want 0", got)
 	}
 	for _, out := range w.AllOutputs() {
-		if !out.Spent {
-			t.Errorf("amount %d still unspent after the key was spent", out.Amount)
+		if status := walletOutputStatus(out, tip+1); status != "spent" {
+			t.Errorf("amount %d status = %q, want spent", out.Amount, status)
 		}
+	}
+}
+
+func TestWalletOutputStatusUnspendable(t *testing.T) {
+	out := &wallet.OwnedOutput{BlockHeight: 10, Unspendable: true}
+	if got := walletOutputStatus(out, 1000); got != "unspendable" {
+		t.Fatalf("status = %q, want unspendable", got)
+	}
+	out.Spent = true
+	if got := walletOutputStatus(out, 1000); got != "spent" {
+		t.Fatalf("spent status = %q, want spent", got)
 	}
 }
 
