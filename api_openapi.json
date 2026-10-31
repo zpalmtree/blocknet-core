@@ -2097,6 +2097,7 @@
         "operationId": "getOutputs",
         "tags": ["Wallet"],
         "summary": "All wallet outputs with full detail",
+        "parameters": [{"name": "status", "in": "query", "required": false, "description": "Filter output status before sorting and serialization. Counts describe the returned subset; omit for the existing complete listing.", "schema": {"type": "string", "enum": ["unspent", "pending", "spent"]}}],
         "description": "Returns every output owned by the wallet with computed status (spent/unspent/pending), confirmations, type, cryptographic keys, and summary counts. Sorted ascending by block height, then txid, then output index. Requires unlocked wallet.",
         "responses": {
           "200": {

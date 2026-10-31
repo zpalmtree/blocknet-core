@@ -48,20 +48,15 @@ func walletBackupDir() (string, error) {
 
 const backupSuffix = ".BACKUP.dat"
 
-// backupWalletFile copies the wallet file into the XDG config directory as two
+// backupWalletData copies the encrypted wallet into the XDG config directory as two
 // independent backups — one visible, one hidden. The filename includes a
 // timestamp for human reference; existing backups for the same address are
 // replaced so we never accumulate duplicates.
-func backupWalletFile(walletFile string, address string) {
+func backupWalletData(data []byte, address string) {
 	dir, err := walletBackupDir()
 	if err != nil {
 		return
 	}
-	data, err := os.ReadFile(walletFile)
-	if err != nil {
-		return
-	}
-
 	suffix := "-" + address + backupSuffix
 	// Remove any previous backups for this address (visible and hidden).
 	if entries, err := os.ReadDir(dir); err == nil {
@@ -373,6 +368,10 @@ type encMeta struct {
 // Wallet manages keys and tracks owned outputs
 type Wallet struct {
 	mu sync.RWMutex
+	// Serialize snapshots and writes so an older save cannot replace a newer one.
+	saveMu sync.Mutex
+	// Only ciphertext is retained; Mnemonic still reads the recovery phrase from disk.
+	encryptedMnemonic []byte
 
 	data     WalletData
 	filename string
@@ -557,9 +556,19 @@ func LoadWallet(filename string, password []byte, cfg WalletConfig) (*Wallet, er
 		return nil, fmt.Errorf("failed to parse wallet data: %w", err)
 	}
 
+	var encryptedMnemonic []byte
+	if !data.ViewOnly && data.Mnemonic != "" {
+		phrase := []byte(data.Mnemonic)
+		encryptedMnemonic, err = encrypt(phrase, password)
+		wipeBytes(phrase)
+		if err != nil {
+			return nil, fmt.Errorf("failed to protect saved mnemonic: %w", err)
+		}
+	}
 	data.Mnemonic = ""
 
 	return &Wallet{
+		encryptedMnemonic:         encryptedMnemonic,
 		data:                      data,
 		filename:                  filename,
 		password:                  cloneBytes(password),
@@ -621,19 +630,51 @@ func LoadOrCreateWallet(filename string, password []byte, cfg WalletConfig) (*Wa
 
 // Save encrypts and writes wallet to disk
 func (w *Wallet) Save() error {
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
+
 	w.mu.RLock()
-	dataToPersist := w.data
-	if !dataToPersist.ViewOnly && dataToPersist.Mnemonic == "" {
-		if mnemonic, err := w.readMnemonicFromDisk(); err == nil && mnemonic != "" {
-			dataToPersist.Mnemonic = mnemonic
-		}
-	}
+	mnemonic := w.data.Mnemonic
+	viewOnly := w.data.ViewOnly
 	password := w.password
 	filename := w.filename
 	address := w.data.Keys.Address()
 	w.mu.RUnlock()
 
-	plaintext, err := json.MarshalIndent(dataToPersist, "", "  ")
+	if !viewOnly && mnemonic == "" {
+		if len(w.encryptedMnemonic) > 0 {
+			plain, err := decrypt(w.encryptedMnemonic, password)
+			if err != nil {
+				return fmt.Errorf("failed to recover saved mnemonic: %w", err)
+			}
+			mnemonic = string(plain)
+			wipeBytes(plain)
+		} else {
+			var err error
+			mnemonic, err = w.readMnemonicFromDisk()
+			if err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("failed to preserve wallet mnemonic: %w", err)
+			}
+		}
+	}
+	var mnemonicCiphertext []byte
+	if !viewOnly && mnemonic != "" && len(w.encryptedMnemonic) == 0 {
+		plain := []byte(mnemonic)
+		var err error
+		mnemonicCiphertext, err = encrypt(plain, password)
+		wipeBytes(plain)
+		if err != nil {
+			return fmt.Errorf("failed to protect saved mnemonic: %w", err)
+		}
+	}
+
+	// Marshal under the read lock: WalletData contains pointers to mutable outputs.
+	// Compact JSON preserves the file schema without persisting indentation.
+	w.mu.RLock()
+	dataToPersist := w.data
+	dataToPersist.Mnemonic = mnemonic
+	plaintext, err := json.Marshal(dataToPersist)
+	w.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("failed to marshal wallet: %w", err)
 	}
@@ -647,13 +688,16 @@ func (w *Wallet) Save() error {
 	if err := writeWalletAtomic(filename, encrypted); err != nil {
 		return fmt.Errorf("failed to write wallet file: %w", err)
 	}
+	if len(mnemonicCiphertext) > 0 {
+		w.encryptedMnemonic = mnemonicCiphertext
+	}
 
 	encMeta := currentEncMeta(int64(len(encrypted)))
 	w.mu.Lock()
 	w.enc = encMeta
 	w.mu.Unlock()
 
-	backupWalletFile(filename, address)
+	backupWalletData(encrypted, address)
 	return nil
 }
 
