@@ -860,14 +860,36 @@ func (s *APIServer) handleSends(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOutputs returns a comprehensive view of all wallet outputs.
-// GET /api/wallet/outputs
+// GET /api/wallet/outputs?status=unspent (optional; counts describe returned outputs)
 func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWallet(w, r) {
 		return
 	}
 
-	outputs := s.wallet.AllOutputs()
+	filter := r.URL.Query().Get("status")
+	if filter != "" && filter != "unspent" && filter != "pending" && filter != "spent" {
+		writeError(w, http.StatusBadRequest, "status must be unspent, pending, or spent")
+		return
+	}
 	chainHeight := s.daemon.Chain().Height()
+	var outputs []*wallet.OwnedOutput
+	switch filter {
+	case "unspent":
+		outputs = s.wallet.MatureOutputs(chainHeight)
+	case "pending":
+		outputs = s.wallet.SpendableOutputs()
+	default:
+		outputs = s.wallet.AllOutputs()
+	}
+	if filter != "" && filter != "unspent" {
+		filtered := outputs[:0]
+		for _, out := range outputs {
+			if walletOutputStatus(out, chainHeight) == filter {
+				filtered = append(filtered, out)
+			}
+		}
+		outputs = filtered
+	}
 	syncedHeight := s.wallet.SyncedHeight()
 
 	sort.Slice(outputs, func(i, j int) bool {
@@ -898,12 +920,7 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]outputEntry, len(outputs))
 	for i, out := range outputs {
-		status := "unspent"
-		if out.Spent {
-			status = "spent"
-		} else if !wallet.IsOutputMature(out, chainHeight) {
-			status = "pending"
-		}
+		status := walletOutputStatus(out, chainHeight)
 
 		switch status {
 		case "spent":
@@ -950,6 +967,16 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 		"pending":       pendingCount,
 		"outputs":       entries,
 	})
+}
+
+func walletOutputStatus(out *wallet.OwnedOutput, chainHeight uint64) string {
+	if out.Spent {
+		return "spent"
+	}
+	if !wallet.IsOutputMature(out, chainHeight) {
+		return "pending"
+	}
+	return "unspent"
 }
 
 // handleSign signs an arbitrary message with the wallet's spend private key.
