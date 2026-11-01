@@ -56,6 +56,12 @@ Local validation logs and diffs are archived under
 
 ## Updating and deploying
 
+Sync recovery cancels outstanding block-range streams when a run ends, cancels
+losing hedge requests, and skips mempool downloads until the block target is
+reached. Incomplete runs log their local height, target and next requested block
+before retrying. This changes no consensus, API, authentication, SSE or mining
+template/submission contract. It requires a rolling daemon deployment to apply.
+
 For the next refresh, start from current upstream master and replay only the
 remaining commits above, dropping accepted patches by content. Preserve any new
 `pool` work, test the complete tree, then retain the previous published pool tip
