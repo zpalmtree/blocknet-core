@@ -562,6 +562,7 @@ func (s *APIServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 		IsCoinbase  bool   `json:"is_coinbase"`
 		Spent       bool   `json:"spent"`
 		SpentHeight uint64 `json:"spent_height,omitempty"`
+		Unspendable bool   `json:"unspendable,omitempty"`
 		MemoHex     string `json:"memo_hex,omitempty"`
 	}
 
@@ -575,6 +576,7 @@ func (s *APIServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 			IsCoinbase:  out.IsCoinbase,
 			Spent:       out.Spent,
 			SpentHeight: out.SpentHeight,
+			Unspendable: out.Unspendable,
 		}
 		if len(out.Memo) > 0 {
 			entries[i].MemoHex = hex.EncodeToString(out.Memo)
@@ -624,6 +626,7 @@ func (s *APIServer) handleHistoryPage(w http.ResponseWriter, r *http.Request) {
 		IsCoinbase  bool   `json:"is_coinbase"`
 		Spent       bool   `json:"spent"`
 		SpentHeight uint64 `json:"spent_height,omitempty"`
+		Unspendable bool   `json:"unspendable,omitempty"`
 		MemoHex     string `json:"memo_hex,omitempty"`
 	}
 
@@ -683,6 +686,7 @@ func (s *APIServer) handleHistoryPage(w http.ResponseWriter, r *http.Request) {
 			IsCoinbase:  out.IsCoinbase,
 			Spent:       out.Spent,
 			SpentHeight: out.SpentHeight,
+			Unspendable: out.Unspendable,
 		}
 		if len(out.Memo) > 0 {
 			entries[i].MemoHex = hex.EncodeToString(out.Memo)
@@ -916,7 +920,7 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 		MemoHex       string `json:"memo_hex,omitempty"`
 	}
 
-	var spentCount, unspentCount, pendingCount int
+	var spentCount, unspentCount, pendingCount, unspendableCount int
 
 	entries := make([]outputEntry, len(outputs))
 	for i, out := range outputs {
@@ -929,6 +933,8 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 			unspentCount++
 		case "pending":
 			pendingCount++
+		case "unspendable":
+			unspendableCount++
 		}
 
 		conf := uint64(0)
@@ -965,6 +971,7 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 		"spent":         spentCount,
 		"unspent":       unspentCount,
 		"pending":       pendingCount,
+		"unspendable":   unspendableCount,
 		"outputs":       entries,
 	})
 }
@@ -972,6 +979,9 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 func walletOutputStatus(out *wallet.OwnedOutput, chainHeight uint64) string {
 	if out.Spent {
 		return "spent"
+	}
+	if out.Unspendable {
+		return "unspendable"
 	}
 	if !wallet.IsOutputMature(out, chainHeight) {
 		return "pending"
