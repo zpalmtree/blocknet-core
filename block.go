@@ -989,6 +989,9 @@ func (c *Chain) passesCheapPrecheck(block *Block) bool {
 	if h.Version == 0 || h.Difficulty < MinDifficulty {
 		return false
 	}
+	if tip, _, _ := c.TipFast(); h.Height+MaxReorgDepth < tip {
+		return false
+	}
 	if len(block.Transactions) == 0 || slices.Contains(block.Transactions, nil) || !block.Transactions[0].IsCoinbase() || block.Size() > MaxBlockSize {
 		return false
 	}
@@ -2079,6 +2082,10 @@ func (c *Chain) validateBlockForProcessLocked(
 	var timing validationTimingBreakdown
 	isSpent := c.isKeyImageSpentLocked
 	isCanonicalRingMember := c.isCanonicalRingMemberLocked
+	// Past the reorg limit a side chain can never win, so it would only fill the disk.
+	if block != nil && block.Header.Height+MaxReorgDepth < c.height {
+		return timing, fmt.Errorf("block height %d is below the reorg limit at tip %d", block.Header.Height, c.height)
+	}
 	if block != nil && block.Header.Height > 0 {
 		stage.Set("spent-context")
 		spentContextStartedAt := time.Now()
@@ -2411,6 +2418,10 @@ func (c *Chain) updateCanonicalRingIndexForDisconnect(blocks []*Block) {
 		for _, tx := range block.Transactions {
 			for _, out := range tx.Outputs {
 				key := canonicalRingIndexKey(out.PublicKey, out.Commitment)
+				// A repeated output stays canonical through its earlier copy.
+				if height, ok := c.canonicalRingHeights[key]; ok && height != block.Header.Height {
+					continue
+				}
 				delete(c.canonicalRingIndex, key)
 				delete(c.canonicalRingHeights, key)
 			}

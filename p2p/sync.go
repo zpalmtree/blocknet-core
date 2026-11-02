@@ -54,6 +54,10 @@ const (
 	// syncForkFetchDepth is how far back a run looks when a peer claims more work
 	// at or below our height, which only a heavier fork can justify.
 	syncForkFetchDepth = 50
+	// minBlockDataBytes is about the size of the smallest possible block.
+	minBlockDataBytes = 1024
+	// syncMaxConcurrentServes bounds block and mempool responses in progress.
+	syncMaxConcurrentServes = 32
 	// syncProtectTag marks peers an active sync run downloads from.
 	syncProtectTag = "sync"
 )
@@ -119,6 +123,8 @@ type SyncManager struct {
 	fetchEWMA atomic.Int64
 	// mempoolSyncing keeps one background mempool fetch at a time.
 	mempoolSyncing atomic.Bool
+	// serveSlots holds one entry per large response being served.
+	serveSlots chan struct{}
 	// lastBlockDataAt is the UnixNano time block data last arrived from a peer.
 	lastBlockDataAt atomic.Int64
 
@@ -286,6 +292,7 @@ func NewSyncManager(node *Node, cfg SyncConfig) *SyncManager {
 		// Debounce status-triggered sync checks; periodic syncLoop still runs.
 		statusSyncMinInterval: 2 * time.Second,
 		claimGiveUpAfter:      syncClaimGiveUpAfter,
+		serveSlots:            make(chan struct{}, syncMaxConcurrentServes),
 	}
 	if cfg.FetchBlocksByHash != nil {
 		sm.fetchBlocksByHash = cfg.FetchBlocksByHash
@@ -332,13 +339,37 @@ func (sm *SyncManager) HandleStream(s network.Stream) {
 	case SyncMsgGetHeaders:
 		sm.handleGetHeaders(s, data)
 	case SyncMsgGetBlocks:
-		sm.handleGetBlocks(s, data)
+		if release, ok := sm.acquireServeSlot(); ok {
+			defer release()
+			sm.handleGetBlocks(s, data)
+		}
 	case SyncMsgGetBlocksByHeight:
-		sm.handleGetBlocksByHeight(s, data)
+		if release, ok := sm.acquireServeSlot(); ok {
+			defer release()
+			sm.handleGetBlocksByHeight(s, data)
+		}
 	case SyncMsgNewBlock:
 		sm.handleNewBlock(s.Conn().RemotePeer(), data)
 	case SyncMsgGetMempool:
-		sm.handleGetMempool(s)
+		if release, ok := sm.acquireServeSlot(); ok {
+			defer release()
+			sm.handleGetMempool(s)
+		}
+	}
+}
+
+// acquireServeSlot bounds how many large responses are built and sent at once, so
+// requests for old blocks can't use up memory or starve block processing. A
+// request past the limit is dropped; an honest peer retries or asks another.
+func (sm *SyncManager) acquireServeSlot() (func(), bool) {
+	if sm.serveSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case sm.serveSlots <- struct{}{}:
+		return func() { <-sm.serveSlots }, true
+	default:
+		return nil, false
 	}
 }
 
@@ -744,15 +775,18 @@ func (sm *SyncManager) syncStalled(lastProgress, now time.Time) bool {
 	return now.Sub(lastActivity) > sm.claimGiveUpAfter
 }
 
-// blockDataReader records when bytes of a block response arrive.
+// blockDataReader records when block data arrives. A reply too small to hold a
+// block doesn't count, so an empty answer can't keep a run alive.
 type blockDataReader struct {
-	r  io.Reader
-	at *atomic.Int64
+	r    io.Reader
+	at   *atomic.Int64
+	seen int
 }
 
-func (b blockDataReader) Read(p []byte) (int, error) {
+func (b *blockDataReader) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
-	if n > 0 {
+	b.seen += n
+	if n > 0 && b.seen >= minBlockDataBytes {
 		b.at.Store(time.Now().UnixNano())
 	}
 	return n, err
@@ -1656,7 +1690,7 @@ func (sm *SyncManager) fetchBlocksByHeightCtx(parent context.Context, p peer.ID,
 		return nil, err
 	}
 
-	msgType, data, err := readMessageWithLimit(blockDataReader{r: s, at: &sm.lastBlockDataAt}, syncMessageMaxSize)
+	msgType, data, err := readMessageWithLimit(&blockDataReader{r: s, at: &sm.lastBlockDataAt}, syncMessageMaxSize)
 	if err != nil {
 		return nil, err
 	}

@@ -189,7 +189,11 @@ func TestHonestPeerDeliversPastAFalseClaim(t *testing.T) {
 	// The liar claims the most work, and never answers.
 	serveChain(liar, claimStatus(500, 5000), func(s network.Stream, _ BlocksByHeightRequest) { holdOpen(s) })
 	serveChain(honest, claimStatus(11, 110), func(s network.Stream, req BlocksByHeightRequest) {
-		payload, _ := json.Marshal([][]byte{[]byte("block-11")})
+		blocks := [][]byte{}
+		if req.StartHeight == 11 {
+			blocks = append(blocks, []byte("block-11"))
+		}
+		payload, _ := json.Marshal(blocks)
 		_ = writeMessage(s, SyncMsgBlocks, payload)
 	})
 	serveChain(nodes[2], claimStatus(10, 100), nil)
@@ -206,9 +210,17 @@ func TestHonestPeerDeliversPastAFalseClaim(t *testing.T) {
 		IsDuplicateError: func(error) bool { return false },
 	})
 	sm.fetchEWMA.Store(int64(time.Millisecond))
+	// Long enough for a hedged request, which reaches the honest peer if the first
+	// batch happened to go to the liar. In production the limit is many hedges long.
+	sm.claimGiveUpAfter = 3 * time.Second
 
+	started := time.Now()
 	sm.checkSync()
 	waitForCondition(t, "the honest peer's block", func() bool { return height.Load() == 11 })
+	// Within the first run, not after the false claim fails and a retry follows.
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the honest block took %s", elapsed)
+	}
 	waitForCondition(t, "the run to give up on the false claim", func() bool { return !sm.IsSyncing() })
 	if !sm.claimCoolingDown(liar) {
 		t.Fatal("the peer that claimed and never delivered should cool down")
