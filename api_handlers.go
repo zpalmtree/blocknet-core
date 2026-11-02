@@ -2858,6 +2858,7 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	// Get mempool transactions sorted by fee rate together with the exact
 	// generation represented by this selection.
 	txs, mempoolGeneration := s.daemon.Mempool().GetTransactionsForBlockSnapshot(blockSpaceForTransactions(coinbase.Tx), 1000)
+	txs = s.daemon.Mempool().KeepSpendableOnChain(txs)
 	header := BlockHeader{
 		Version:    1,
 		Height:     tp.Height,

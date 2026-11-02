@@ -1123,6 +1123,7 @@ func (d *Daemon) updateMempoolForAcceptedMainChain(block *Block, previousBest [3
 		d.mempool.OnBlockConnected(b)
 	}
 
+	d.mempool.RemoveUnspendableOnChain()
 	d.mempool.RemoveExpired()
 }
 
