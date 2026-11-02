@@ -145,29 +145,27 @@ func TestUndeliveredMinorityClaimEndsAndCoolsDownThePeer(t *testing.T) {
 
 	sm.mu.Lock()
 	sm.claimCooldowns[claimer.PeerID()] = time.Now().Add(-time.Second)
-	sm.claimRunsResumeAt = time.Time{}
 	sm.mu.Unlock()
 	sm.checkSync()
 	waitForCondition(t, "a run after the cooldown ended", func() bool { return requests.Load() > seen })
 	waitForCondition(t, "the second run to give up", func() bool { return !sm.IsSyncing() })
 }
 
-func TestFreshPeerCannotRestartAClaimRunImmediately(t *testing.T) {
+func TestFailedClaimDoesNotHoldUpAnHonestPeer(t *testing.T) {
 	local := mustNewTestNode(t)
 	defer func() { _ = local.Stop() }()
 	nodes := connectedTestNodes(t, local, 3)
-	first := nodes[0]
 
-	serveChain(first, claimStatus(13, 130), func(s network.Stream, _ BlocksByHeightRequest) { holdOpen(s) })
+	serveChain(nodes[0], claimStatus(13, 130), func(s network.Stream, _ BlocksByHeightRequest) { holdOpen(s) })
 	serveChain(nodes[1], claimStatus(10, 100), nil)
 	serveChain(nodes[2], claimStatus(10, 100), nil)
-
 	sm := newClaimTestManager(t, local, SyncConfig{GetStatus: func() ChainStatus { return claimStatus(10, 100) }})
 	sm.checkSync()
 	waitForCondition(t, "the sync run to start", sm.IsSyncing)
 	waitForCondition(t, "the run to give up", func() bool { return !sm.IsSyncing() })
 
-	// A new identity making the same claim must wait out the spacing too.
+	// A new identity's claim starts right away, because a claim costs nothing
+	// while it can't stop templates or crowd out honest peers.
 	second := connectedTestNodes(t, local, 1)[0]
 	var requests atomic.Int32
 	serveChain(second, claimStatus(13, 130), func(s network.Stream, _ BlocksByHeightRequest) {
@@ -175,51 +173,136 @@ func TestFreshPeerCannotRestartAClaimRunImmediately(t *testing.T) {
 		holdOpen(s)
 	})
 	sm.checkSync()
-	time.Sleep(100 * time.Millisecond)
-	if sm.IsSyncing() || requests.Load() != 0 {
-		t.Fatal("a new peer's claim started a run during the spacing")
+	waitForCondition(t, "the new peer's run", func() bool { return requests.Load() > 0 })
+	if sm.IsSyncingFarBehind(0) {
+		t.Fatal("a claim must not stop template serving")
 	}
-
-	sm.mu.Lock()
-	sm.claimRunsResumeAt = time.Time{}
-	sm.mu.Unlock()
-	sm.checkSync()
-	waitForCondition(t, "a run after the spacing ended", func() bool { return requests.Load() > 0 })
 	waitForCondition(t, "the second run to give up", func() bool { return !sm.IsSyncing() })
 }
 
-func TestCorroboratedClaimCountsAsBehindImmediately(t *testing.T) {
+func TestHonestPeerDeliversPastAFalseClaim(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	nodes := connectedTestNodes(t, local, 3)
+	liar, honest := nodes[0], nodes[1]
+
+	// The liar claims the most work, and never answers.
+	serveChain(liar, claimStatus(500, 5000), func(s network.Stream, _ BlocksByHeightRequest) { holdOpen(s) })
+	serveChain(honest, claimStatus(11, 110), func(s network.Stream, req BlocksByHeightRequest) {
+		payload, _ := json.Marshal([][]byte{[]byte("block-11")})
+		_ = writeMessage(s, SyncMsgBlocks, payload)
+	})
+	serveChain(nodes[2], claimStatus(10, 100), nil)
+
+	var height atomic.Uint64
+	height.Store(10)
+	sm := newClaimTestManager(t, local, SyncConfig{
+		GetStatus: func() ChainStatus {
+			h := height.Load()
+			return claimStatus(h, h*10)
+		},
+		ProcessBlock:     func([]byte) error { height.Store(11); return nil },
+		IsOrphanError:    func(error) bool { return false },
+		IsDuplicateError: func(error) bool { return false },
+	})
+	sm.fetchEWMA.Store(int64(time.Millisecond))
+
+	sm.checkSync()
+	waitForCondition(t, "the honest peer's block", func() bool { return height.Load() == 11 })
+	waitForCondition(t, "the run to give up on the false claim", func() bool { return !sm.IsSyncing() })
+	if !sm.claimCoolingDown(liar) {
+		t.Fatal("the peer that claimed and never delivered should cool down")
+	}
+	if sm.claimCoolingDown(honest) {
+		t.Fatal("the peer that delivered must not cool down")
+	}
+}
+
+func TestMajorityClaimCountsAsBehindOnlyAfterABlock(t *testing.T) {
 	local := mustNewTestNode(t)
 	defer func() { _ = local.Stop() }()
 	nodes := connectedTestNodes(t, local, 3)
 
-	requested := make(chan struct{}, 8)
-	claim := func(s network.Stream, _ BlocksByHeightRequest) {
-		requested <- struct{}{}
-		holdOpen(s)
-	}
+	claim := func(s network.Stream, _ BlocksByHeightRequest) { holdOpen(s) }
 	serveChain(nodes[0], claimStatus(13, 130), claim)
 	serveChain(nodes[1], claimStatus(13, 130), claim)
 	serveChain(nodes[2], claimStatus(10, 100), nil)
 
 	sm := newClaimTestManager(t, local, SyncConfig{GetStatus: func() ChainStatus { return claimStatus(10, 100) }})
-	// A claim most peers make isn't held back by a recent failed minority run.
-	sm.claimRunsResumeAt = time.Now().Add(time.Hour)
-
 	sm.checkSync()
 	waitForCondition(t, "the sync run to start", sm.IsSyncing)
-	if got := sm.BlocksBehind(); got != 3 {
-		t.Fatalf("majority claim: %d blocks behind, want 3", got)
+	if sm.IsSyncingFarBehind(2) {
+		t.Fatal("status votes must not stop template serving")
 	}
-	<-requested
-	time.Sleep(2 * sm.claimGiveUpAfter)
-	if !sm.IsSyncing() || sm.BlocksBehind() != 3 {
-		t.Fatal("a majority claim must keep the full give-up time")
+	if sm.PeerTipChecked() {
+		t.Fatal("a starting node should wait for the first block when most peers are ahead")
 	}
-	sm.cancel()
-	waitForCondition(t, "the canceled run to end", func() bool { return !sm.IsSyncing() })
+	waitForCondition(t, "the run to give up", func() bool { return !sm.IsSyncing() })
+	if !sm.PeerTipChecked() {
+		t.Fatal("the tip should count as checked once the run ends")
+	}
 	if sm.claimCoolingDown(nodes[0]) || sm.claimCoolingDown(nodes[1]) {
-		t.Fatal("peers in a majority claim must not be cooled down")
+		t.Fatal("with most peers ahead and nothing delivered the fault may be ours")
+	}
+}
+
+func TestLowHeightClaimIsCooledDown(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	nodes := connectedTestNodes(t, local, 3)
+	claimer := nodes[0]
+
+	// More work at a height below ours, with nothing behind it.
+	serveChain(claimer, claimStatus(5, 900), func(s network.Stream, _ BlocksByHeightRequest) { holdOpen(s) })
+	serveChain(nodes[1], claimStatus(100, 500), nil)
+	serveChain(nodes[2], claimStatus(100, 500), nil)
+
+	sm := newClaimTestManager(t, local, SyncConfig{GetStatus: func() ChainStatus { return claimStatus(100, 500) }})
+	sm.checkSync()
+	waitForCondition(t, "the sync run to start", sm.IsSyncing)
+	waitForCondition(t, "the run to give up", func() bool { return !sm.IsSyncing() })
+	if !sm.claimCoolingDown(claimer) {
+		t.Fatal("a claim at a low height that delivers nothing should cool down")
+	}
+}
+
+func TestBlocksStoppingEndsTheBehindState(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	nodes := connectedTestNodes(t, local, 3)
+
+	var height atomic.Uint64
+	height.Store(10)
+	// One real block, then a fake target far above it.
+	serve := func(s network.Stream, req BlocksByHeightRequest) {
+		if req.StartHeight != 11 {
+			holdOpen(s)
+			return
+		}
+		payload, _ := json.Marshal([][]byte{[]byte("block-11")})
+		_ = writeMessage(s, SyncMsgBlocks, payload)
+	}
+	serveChain(nodes[0], claimStatus(500, 5000), serve)
+	serveChain(nodes[1], claimStatus(500, 5000), serve)
+	serveChain(nodes[2], claimStatus(10, 100), nil)
+	sm := newClaimTestManager(t, local, SyncConfig{
+		GetStatus: func() ChainStatus {
+			h := height.Load()
+			return claimStatus(h, h*10)
+		},
+		ProcessBlock:     func([]byte) error { height.Store(11); return nil },
+		IsOrphanError:    func(error) bool { return false },
+		IsDuplicateError: func(error) bool { return false },
+	})
+	sm.fetchEWMA.Store(int64(time.Millisecond))
+
+	sm.checkSync()
+	waitForCondition(t, "the delivered block", func() bool { return height.Load() == 11 })
+	waitForCondition(t, "the stall to end the behind state", func() bool { return !sm.IsSyncingFarBehind(2) })
+	waitForCondition(t, "the run to give up", func() bool { return !sm.IsSyncing() })
+	if !sm.claimCoolingDown(nodes[0]) && !sm.claimCoolingDown(nodes[1]) {
+		// One of them delivered; the other must have cooled down.
+		t.Fatal("a peer that claimed and delivered nothing should cool down")
 	}
 }
 

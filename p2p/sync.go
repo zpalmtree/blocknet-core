@@ -51,9 +51,9 @@ const (
 	// syncClaimCooldown is how long a peer's status is ignored after it
 	// advertised more work and did not deliver it.
 	syncClaimCooldown = 10 * time.Minute
-	// syncClaimRunSpacing is how long after such a run fails before any other
-	// minority claim may start one, so claims can't occupy the only sync run.
-	syncClaimRunSpacing = 2 * time.Minute
+	// syncForkFetchDepth is how far back a run looks when a peer claims more work
+	// at or below our height, which only a heavier fork can justify.
+	syncForkFetchDepth = 50
 	// syncProtectTag marks peers an active sync run downloads from.
 	syncProtectTag = "sync"
 )
@@ -117,6 +117,8 @@ type SyncManager struct {
 	mu sync.RWMutex
 
 	fetchEWMA atomic.Int64
+	// mempoolSyncing keeps one background mempool fetch at a time.
+	mempoolSyncing atomic.Bool
 	// lastBlockDataAt is the UnixNano time block data last arrived from a peer.
 	lastBlockDataAt atomic.Int64
 
@@ -169,7 +171,6 @@ type SyncManager struct {
 	syncClaimUnverified bool
 	claimGiveUpAfter    time.Duration
 	claimCooldowns      map[peer.ID]time.Time
-	claimRunsResumeAt   time.Time
 }
 
 const (
@@ -711,13 +712,18 @@ collectStatuses:
 		}
 	}
 
-	corroborated := len(syncPeers)*2 > responded
-	if !corroborated && sm.claimRunsPaused(time.Now()) {
-		return
+	// Status messages prove nothing, so every peer ahead of us takes part: a false
+	// claim at the top can't keep an honest peer with fewer blocks from serving them.
+	aheadPeers := make([]PeerStatus, 0, len(peerStatuses))
+	for _, ps := range peerStatuses {
+		if ps.Status.TotalWork > ourStatus.TotalWork {
+			aheadPeers = append(aheadPeers, ps)
+		}
 	}
+	corroborated := len(aheadPeers)*2 > responded
 
-	cryptoShuffle(syncPeers)
-	go sm.parallelSyncFrom(syncPeers, targetHeight, corroborated)
+	cryptoShuffle(aheadPeers)
+	go sm.parallelSyncFrom(aheadPeers, targetHeight, corroborated)
 }
 
 // syncStalled reports whether a run should give up. Any run gets syncGiveUpAfter
@@ -750,13 +756,6 @@ func (b blockDataReader) Read(p []byte) (int, error) {
 		b.at.Store(time.Now().UnixNano())
 	}
 	return n, err
-}
-
-// claimRunsPaused reports whether minority claims are waiting out a failed run.
-func (sm *SyncManager) claimRunsPaused(now time.Time) bool {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return now.Before(sm.claimRunsResumeAt)
 }
 
 // withoutCooledDownPeers drops peers whose advertised work is being ignored and
@@ -846,15 +845,20 @@ func (sm *SyncManager) getStatusFrom(p peer.ID) (ChainStatus, error) {
 	return status, nil
 }
 
-// parallelSyncFrom performs parallel chain sync from multiple peers. corroborated
-// says most responding peers advertise the target's work. Without that, the run
-// doesn't count as being behind until a block above the local tip arrives.
+// parallelSyncFrom performs parallel chain sync from multiple peers. A run counts
+// as being behind only while blocks above the local tip are arriving: however many
+// peers make the claim, a status message proves nothing. corroborated says most
+// responding peers are ahead of us, so a run that gets nothing is probably our own
+// connectivity and its peers keep their standing.
 func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64, corroborated bool) {
 	sm.mu.Lock()
 	// A peer is ahead. Mark the tip checked only under the lock that registers
 	// the sync run, so PeerTipChecked never reads true while IsSyncing and
-	// IsSyncingFarBehind still describe the pre-sync tip as current.
-	sm.peerTipChecked.Store(true)
+	// IsSyncingFarBehind still describe the pre-sync tip as current. If most peers
+	// are ahead, a starting node waits for the first block or the end of the run.
+	if !corroborated {
+		sm.peerTipChecked.Store(true)
+	}
 	if sm.syncing {
 		sm.mu.Unlock()
 		return
@@ -865,13 +869,14 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 	}
 	sm.syncStartTime = time.Now()
 	sm.syncTarget = targetHeight
-	sm.syncClaimUnverified = !corroborated
+	sm.syncClaimUnverified = true
 	sm.downloadBuffer = make(map[uint64]DownloadedBlock) // Reset buffer
 	sm.mu.Unlock()
 
 	defer sm.protectSyncPeers(peers)()
 
 	defer func() {
+		sm.peerTipChecked.Store(true)
 		sm.mu.Lock()
 		sm.syncing = false
 		sm.syncPeer = ""
@@ -884,7 +889,18 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 
 	// Get our current height
 	ourStatus := sm.getStatus()
+	var claimedWork uint64
+	for _, ps := range peers {
+		claimedWork = max(claimedWork, ps.Status.TotalWork)
+	}
 	startHeight := computeSyncStartHeight(ourStatus.Height, targetHeight)
+	if targetHeight <= ourStatus.Height && claimedWork > ourStatus.TotalWork {
+		// More work at or below our height: only a heavier fork can justify it.
+		startHeight = 1
+		if targetHeight > syncForkFetchDepth {
+			startHeight = targetHeight - syncForkFetchDepth
+		}
+	}
 
 	sm.mu.Lock()
 	sm.syncProgress = ourStatus.Height
@@ -906,6 +922,9 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 	defer cancel()
 
 	var downloadWg sync.WaitGroup
+
+	// Peers whose block above our tip was accepted, written by the processor only.
+	delivered := make(map[peer.ID]struct{})
 
 	var timedOut sync.Map
 	penalizeTimeout := func(p peer.ID) {
@@ -997,6 +1016,12 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 				case <-ctx.Done():
 					return
 				case <-stall.C:
+					// Blocks have stopped, so this no longer counts as being behind.
+					if time.Since(lastProgress) > sm.claimGiveUpAfter {
+						sm.mu.Lock()
+						sm.syncClaimUnverified = true
+						sm.mu.Unlock()
+					}
 					if sm.syncStalled(lastProgress, time.Now()) {
 						return
 					}
@@ -1029,6 +1054,8 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 			sm.syncProgress = nextHeight
 			if accepted && nextHeight > ourStatus.Height {
 				sm.syncClaimUnverified = false
+				sm.peerTipChecked.Store(true)
+				delivered[sourcePeer] = struct{}{}
 			}
 			delete(sm.downloadBuffer, nextHeight)
 			sm.mu.Unlock()
@@ -1062,36 +1089,27 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 	downloadWg.Wait()
 	<-processorDone
 
-	finalHeight := sm.getStatus().Height
-	if finalHeight < targetHeight && sm.ctx.Err() == nil {
-		unverified := sm.syncRunUnverified()
-		log.Printf("[sync] incomplete block sync: local=%d target=%d next=%d peers=%d (%s) unverified=%t elapsed=%s",
-			finalHeight, targetHeight, nextHeight, len(peers), peerIDsForLog(peers), unverified, time.Since(sm.syncStartTime).Round(time.Millisecond))
-		if unverified {
-			sm.coolDownPeers(peers, time.Now(), penalizeTimeout)
+	final := sm.getStatus()
+	claimUnmet := final.Height < targetHeight || (targetHeight <= ourStatus.Height && final.TotalWork < claimedWork)
+	if claimUnmet && sm.ctx.Err() == nil {
+		log.Printf("[sync] incomplete block sync: local=%d target=%d next=%d peers=%d (%s) delivered=%d elapsed=%s",
+			final.Height, targetHeight, nextHeight, len(peers), peerIDsForLog(peers), len(delivered), time.Since(sm.syncStartTime).Round(time.Millisecond))
+		// If most peers are ahead and none delivered, the fault is probably ours,
+		// and cooling them all down would leave nothing to sync from.
+		if !corroborated || len(delivered) > 0 {
+			sm.coolDownPeers(undeliveredClaims(peers, delivered, final.TotalWork), time.Now(), penalizeTimeout)
 		}
 	}
 
-	// After syncing blocks, request mempool — try each sync peer until one succeeds.
-	// An incomplete run must retry block sync without waiting on mempool peers.
-	if finalHeight >= targetHeight && sm.ctx.Err() == nil && len(peers) > 0 && sm.getMempool != nil && sm.processTx != nil {
-		var mempoolOK bool
-		for _, ps := range peers {
-			if err := sm.fetchAndProcessMempool(ps.Peer); err != nil {
-				continue
-			}
-			mempoolOK = true
-			break
-		}
-		if !mempoolOK {
-			log.Printf("[sync] mempool sync failed from all %d peers", len(peers))
-		}
+	// Fetch the mempool outside the run: peers that never answer shouldn't hold the
+	// sync slot. An incomplete run must retry block sync instead.
+	if !claimUnmet && sm.ctx.Err() == nil && len(peers) > 0 && sm.getMempool != nil && sm.processTx != nil {
+		go sm.syncMempoolFrom(peers)
 	}
 
 	// If we didn't reach target, immediately re-check instead of waiting
 	// for the 30s periodic tick. Covers transient peer failures.
-	finalHeight = sm.getStatus().Height
-	if finalHeight < targetHeight && sm.ctx != nil && sm.ctx.Err() == nil {
+	if claimUnmet && sm.ctx != nil && sm.ctx.Err() == nil {
 		go func() {
 			select {
 			case <-time.After(3 * time.Second):
@@ -1102,8 +1120,36 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 	}
 }
 
-// coolDownPeers ignores these peers' advertised work for syncClaimCooldown and
-// holds off runs for any other minority claim for syncClaimRunSpacing.
+// undeliveredClaims returns the peers that advertised more work than we now have
+// and delivered no block above our tip.
+func undeliveredClaims(peers []PeerStatus, delivered map[peer.ID]struct{}, work uint64) []PeerStatus {
+	out := make([]PeerStatus, 0, len(peers))
+	for _, ps := range peers {
+		if _, ok := delivered[ps.Peer]; !ok && ps.Status.TotalWork > work {
+			out = append(out, ps)
+		}
+	}
+	return out
+}
+
+// syncMempoolFrom fetches the mempool from the first of these peers that answers.
+func (sm *SyncManager) syncMempoolFrom(peers []PeerStatus) {
+	if !sm.mempoolSyncing.CompareAndSwap(false, true) {
+		return
+	}
+	defer sm.mempoolSyncing.Store(false)
+	for _, ps := range peers {
+		if sm.ctx.Err() != nil {
+			return
+		}
+		if err := sm.fetchAndProcessMempool(ps.Peer); err == nil {
+			return
+		}
+	}
+	log.Printf("[sync] mempool sync failed from all %d peers", len(peers))
+}
+
+// coolDownPeers ignores these peers' advertised work for syncClaimCooldown.
 func (sm *SyncManager) coolDownPeers(peers []PeerStatus, now time.Time, penalize func(peer.ID)) {
 	sm.mu.Lock()
 	if sm.claimCooldowns == nil {
@@ -1112,7 +1158,6 @@ func (sm *SyncManager) coolDownPeers(peers []PeerStatus, now time.Time, penalize
 	for _, ps := range peers {
 		sm.claimCooldowns[ps.Peer] = now.Add(syncClaimCooldown)
 	}
-	sm.claimRunsResumeAt = now.Add(syncClaimRunSpacing)
 	sm.mu.Unlock()
 	for _, ps := range peers {
 		penalize(ps.Peer)
@@ -1187,6 +1232,9 @@ func (sm *SyncManager) hedgeFetch(ctx context.Context, peers []PeerStatus, from,
 }
 
 func computeSyncStartHeight(ourHeight uint64, targetHeight uint64) uint64 {
+	if targetHeight <= ourHeight {
+		return ourHeight + 1
+	}
 	startHeight := ourHeight + 1
 	// Keep existing overlap semantics for near-tip sync.
 	if gap := targetHeight - ourHeight; gap <= 50 && ourHeight > 10 {
