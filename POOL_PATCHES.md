@@ -65,7 +65,8 @@ template/submission contract. It requires a rolling daemon deployment to apply.
 A peer's status alone no longer marks the node as behind. When only a minority of
 responding peers advertise the most work, `syncing`, `blocks_behind` and template
 serving ignore the run until a block above the local tip arrives; `sync_in_progress`
-still reports it. Such a run gives up after 30 seconds without blocks. Its peers'
+still reports it. Such a run gives up after 30 seconds without any block data, or
+after the usual 2 minutes while data is still arriving but no block completes. Its peers'
 status is then ignored for 10 minutes and they lose peer score, and no other minority
 claim can start a run for 2 minutes. A run most peers corroborate behaves as before.
 No field or endpoint changes, but `syncing` is false in more cases. It requires a
