@@ -90,6 +90,7 @@ type Daemon struct {
 	blockIntakeMu        sync.Mutex
 	blockIntakeInFlight  map[[32]byte]struct{}
 	blockIntakeUntrusted bool
+	blockIntakePending   int
 
 	// Startup tip-freshness gate for mining templates (templateTipChecked).
 	syncStartedAt  atomic.Pointer[time.Time] // set when Start launches sync
@@ -769,6 +770,11 @@ func isOrphanBlockError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "incomplete chain")
 }
 
+// maxPendingBlockVerifications bounds announced blocks verifying or queued to. Past
+// it they are dropped and a sync check fetches anything real, so a flood can't build
+// up minutes of work that outlives the peers who sent it.
+const maxPendingBlockVerifications = 4
+
 // verifyAnnouncedBlock checks an announced block's proof of work and signatures
 // with no lock held, so announcements can't delay real blocks or our own
 // submissions. Each block is verified once at a time, and peers without a track
@@ -792,7 +798,7 @@ func (d *Daemon) verifyAnnouncedBlock(from peer.ID, block *Block) (BlockPreverif
 	d.blockIntakeInFlight[hash] = struct{}{}
 	d.blockIntakeMu.Unlock()
 
-	holdsUntrusted := false
+	holdsUntrusted, holdsPending := false, false
 	finish := func() {
 		d.blockIntakeMu.Lock()
 		defer d.blockIntakeMu.Unlock()
@@ -800,24 +806,30 @@ func (d *Daemon) verifyAnnouncedBlock(from peer.ID, block *Block) (BlockPreverif
 		if holdsUntrusted {
 			d.blockIntakeUntrusted = false
 		}
+		if holdsPending {
+			d.blockIntakePending--
+		}
 	}
 
 	if !d.chain.NeedsPreverification(block) {
 		return BlockPreverification{}, finish, nil
 	}
-	if d.node != nil && !d.node.IsTrustedBlockSource(from) {
-		d.blockIntakeMu.Lock()
-		if d.blockIntakeUntrusted {
-			d.blockIntakeMu.Unlock()
-			if d.syncMgr != nil {
-				d.syncMgr.RequestSyncCheck()
-			}
-			return BlockPreverification{}, finish, errBlockIntakeBusy
+	trusted := d.node == nil || d.node.IsTrustedBlockSource(from)
+	d.blockIntakeMu.Lock()
+	if d.blockIntakePending >= maxPendingBlockVerifications || (!trusted && d.blockIntakeUntrusted) {
+		d.blockIntakeMu.Unlock()
+		if d.syncMgr != nil {
+			d.syncMgr.RequestSyncCheck()
 		}
+		return BlockPreverification{}, finish, errBlockIntakeBusy
+	}
+	d.blockIntakePending++
+	holdsPending = true
+	if !trusted {
 		d.blockIntakeUntrusted = true
 		holdsUntrusted = true
-		d.blockIntakeMu.Unlock()
 	}
+	d.blockIntakeMu.Unlock()
 	preverification, err := d.chain.PreverifyBlock(block)
 	return preverification, finish, err
 }
@@ -1458,7 +1470,7 @@ func (d *Daemon) SubmitBlock(block *Block) error {
 func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
 	var t submitBlockTimings
 	startedAt := time.Now()
-	preverification, err := d.chain.PreverifyBlock(block)
+	preverification, err := d.chain.PreverifyOwnBlock(block)
 	t.Process.Preverify = preverification.Duration
 	if err != nil {
 		d.observeRejectedSubmit(startedAt)

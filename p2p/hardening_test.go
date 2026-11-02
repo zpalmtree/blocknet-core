@@ -148,24 +148,38 @@ func TestFluffedRecordsDropTheirData(t *testing.T) {
 	}
 }
 
-func TestServeSlotsAreBounded(t *testing.T) {
-	sm := &SyncManager{serveSlots: make(chan struct{}, 2)}
-	first, ok := sm.acquireServeSlot()
-	if !ok {
-		t.Fatal("first slot")
+func TestServeSlotsAreBoundedPerPeerAndInTotal(t *testing.T) {
+	sm := &SyncManager{serveSlots: make(chan struct{}, syncMaxServesPerPeer+2), servesByPeer: make(map[peer.ID]int)}
+	busy := peer.ID("busy")
+	var releases []func()
+	for i := 0; i < syncMaxServesPerPeer; i++ {
+		release, ok := sm.acquireServeSlot(busy)
+		if !ok {
+			t.Fatalf("slot %d refused", i)
+		}
+		releases = append(releases, release)
 	}
-	second, ok := sm.acquireServeSlot()
-	if !ok {
-		t.Fatal("second slot")
+	if _, ok := sm.acquireServeSlot(busy); ok {
+		t.Fatal("one peer took more than its share")
 	}
-	if _, ok := sm.acquireServeSlot(); ok {
-		t.Fatal("a third response should be refused")
+	other := peer.ID("other")
+	for i := 0; i < 2; i++ {
+		release, ok := sm.acquireServeSlot(other)
+		if !ok {
+			t.Fatal("another peer was refused while slots were free")
+		}
+		releases = append(releases, release)
 	}
-	first()
-	third, ok := sm.acquireServeSlot()
-	if !ok {
+	if _, ok := sm.acquireServeSlot(peer.ID("third")); ok {
+		t.Fatal("the total limit was exceeded")
+	}
+	for _, release := range releases {
+		release()
+	}
+	if len(sm.servesByPeer) != 0 {
+		t.Fatalf("per-peer counts left behind: %v", sm.servesByPeer)
+	}
+	if _, ok := sm.acquireServeSlot(busy); !ok {
 		t.Fatal("a released slot should be reusable")
 	}
-	second()
-	third()
 }

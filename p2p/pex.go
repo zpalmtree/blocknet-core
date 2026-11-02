@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"blocknet/protocol/params"
@@ -142,19 +143,19 @@ type PeerRecord struct {
 
 // Ban thresholds and durations
 const (
-	peerStartingScore       = 50 // Every peer starts here
-	pexStreamTimeout        = 30 * time.Second
-	maxOutboundDialsPerTick = 4
-	ScoreThresholdBan       = 0   // Score at or below triggers ban
-	ScoreThresholdWarn      = 20  // Score below this is concerning
-	ScorePenaltyInvalid     = -10 // Penalty for invalid data
-	ScorePenaltyTimeout     = -5  // Penalty for timeout
-	ScorePenaltyMisbehave   = -25 // Penalty for misbehavior
-	ScoreRewardGood         = 1   // Reward for good behavior
-	BanDurationShort        = 15 * time.Minute
-	BanDurationMedium       = 2 * time.Hour
-	BanDurationLong         = 24 * time.Hour
-	MaxBansBeforePermanent  = 5 // After this many bans, permanent ban
+	peerStartingScore        = 50 // Every peer starts here
+	pexStreamTimeout         = 30 * time.Second
+	maxOutboundDialsPerRound = 4
+	ScoreThresholdBan        = 0   // Score at or below triggers ban
+	ScoreThresholdWarn       = 20  // Score below this is concerning
+	ScorePenaltyInvalid      = -10 // Penalty for invalid data
+	ScorePenaltyTimeout      = -5  // Penalty for timeout
+	ScorePenaltyMisbehave    = -25 // Penalty for misbehavior
+	ScoreRewardGood          = 1   // Reward for good behavior
+	BanDurationShort         = 15 * time.Minute
+	BanDurationMedium        = 2 * time.Hour
+	BanDurationLong          = 24 * time.Hour
+	MaxBansBeforePermanent   = 5 // After this many bans, permanent ban
 )
 
 const (
@@ -180,7 +181,8 @@ type BanRecord struct {
 
 // PeerExchange manages peer discovery without public DHT
 type PeerExchange struct {
-	mu sync.RWMutex
+	dialsInFlight atomic.Int32
+	mu            sync.RWMutex
 
 	node         *Node
 	seedNodes    []peer.AddrInfo
@@ -414,6 +416,7 @@ func (pex *PeerExchange) doExchange() {
 		}(p)
 	}
 	wg.Wait()
+	pex.refillOutbound()
 }
 
 // exchangeWith performs peer exchange with a specific peer
@@ -483,11 +486,6 @@ func (pex *PeerExchange) exchangeWith(p peer.ID) {
 
 		if len(addrs) > 0 {
 			pex.addKnownPeer(pid, addrs)
-
-			// Try to connect if we need more peers we chose ourselves.
-			if pex.node.outboundPeerCount() < pex.node.config.MaxOutbound {
-				go pex.tryConnect(pid, addrs)
-			}
 		}
 	}
 
@@ -704,6 +702,14 @@ func (pex *PeerExchange) knownPeersToDial() []knownPeerDial {
 	return candidates
 }
 
+// refillOutbound starts dials toward our outbound peer count, a few at a time.
+func (pex *PeerExchange) refillOutbound() {
+	need := pex.node.config.MaxOutbound - pex.node.outboundPeerCount() - int(pex.dialsInFlight.Load())
+	if need > 0 {
+		pex.dialKnownPeers(min(need, maxOutboundDialsPerRound))
+	}
+}
+
 // dialKnownPeers starts dials to up to count known peers that aren't banned.
 func (pex *PeerExchange) dialKnownPeers(count int) {
 	for _, c := range pex.knownPeersToDial() {
@@ -714,7 +720,11 @@ func (pex *PeerExchange) dialKnownPeers(count int) {
 			continue
 		}
 		count--
-		go pex.tryConnect(c.pid, c.addrs)
+		pex.dialsInFlight.Add(1)
+		go func(c knownPeerDial) {
+			defer pex.dialsInFlight.Add(-1)
+			pex.tryConnect(c.pid, c.addrs)
+		}(c)
 	}
 }
 
@@ -1276,9 +1286,7 @@ func (pex *PeerExchange) reconnectLoop() {
 					log.Printf("PEX reconnect loop seed dial failed: %v", err)
 				}
 			}
-			if outbound < pex.node.config.MaxOutbound {
-				pex.dialKnownPeers(min(maxOutboundDialsPerTick, pex.node.config.MaxOutbound-outbound))
-			}
+			pex.refillOutbound()
 		}
 	}
 }

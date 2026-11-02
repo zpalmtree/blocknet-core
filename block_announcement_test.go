@@ -190,6 +190,52 @@ func TestUntrustedPeersShareOneVerificationSlot(t *testing.T) {
 	}
 }
 
+func TestOwnBlockDoesNotWaitForAVerificationSlot(t *testing.T) {
+	f := newAnnouncementFixture(t)
+	for i := 0; i < cap(blockVerifySlots); i++ {
+		blockVerifySlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(blockVerifySlots); i++ {
+			<-blockVerifySlots
+		}
+	}()
+	previous := runBlockPreverify
+	runBlockPreverify = func(*Block) error { return errors.New("invalid proof of work") }
+	defer func() { runBlockPreverify = previous }()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.daemon.SubmitBlockTimed(f.block)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected the stubbed verification to reject the block")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("our own block waited behind other verifications")
+	}
+}
+
+func TestPendingVerificationsAreBounded(t *testing.T) {
+	f := newAnnouncementFixture(t)
+	f.daemon.blockIntakePending = maxPendingBlockVerifications
+	_, _, calls := stubPreverify(t, nil)
+	// Even a peer we trust is dropped once too much work is queued.
+	err := f.daemon.processAnnouncedBlock(f.sender.PeerID(), f.data)
+	if !errors.Is(err, errBlockIntakeBusy) {
+		t.Fatalf("got %v, want the intake to report busy", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("a full queue should not start a verification")
+	}
+	if f.daemon.blockIntakePending != maxPendingBlockVerifications {
+		t.Fatal("a dropped block must not change the pending count")
+	}
+}
+
 func TestDeliveredBlocksEarnTrust(t *testing.T) {
 	f := newAnnouncementFixture(t)
 	if f.receiver.IsTrustedBlockSource(f.sender.PeerID()) {

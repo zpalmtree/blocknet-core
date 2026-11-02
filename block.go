@@ -1916,6 +1916,19 @@ func (c *Chain) PreverifyBlock(block *Block) (BlockPreverification, error) {
 	startedAt := time.Now()
 	blockVerifySlots <- struct{}{}
 	defer func() { <-blockVerifySlots }()
+	return finishPreverify(block, startedAt)
+}
+
+// PreverifyOwnBlock is PreverifyBlock for a block this node's miners found. It
+// doesn't wait for a verification slot: nothing a peer sends may delay our block.
+func (c *Chain) PreverifyOwnBlock(block *Block) (BlockPreverification, error) {
+	if !c.NeedsPreverification(block) {
+		return BlockPreverification{}, nil
+	}
+	return finishPreverify(block, time.Now())
+}
+
+func finishPreverify(block *Block, startedAt time.Time) (BlockPreverification, error) {
 	if err := runBlockPreverify(block); err != nil {
 		return BlockPreverification{Duration: time.Since(startedAt)}, err
 	}

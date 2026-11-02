@@ -144,7 +144,8 @@ func (n *Node) protectChosenPeer(c network.Conn) {
 		return
 	}
 	pid := c.RemotePeer()
-	if c.Stat().Direction != network.DirOutbound && (n.pex == nil || !n.pex.isSeed(pid)) {
+	seed := n.pex != nil && n.pex.isSeed(pid)
+	if !seed && (c.Stat().Direction != network.DirOutbound || n.outboundPeerCount() > n.config.MaxOutbound) {
 		return
 	}
 	n.host.ConnManager().Protect(pid, chosenPeerProtectTag)
@@ -164,11 +165,8 @@ func (n *Node) releaseChosenPeer(c network.Conn) {
 func (n *Node) outboundPeerCount() int {
 	count := 0
 	for _, pid := range n.host.Network().Peers() {
-		for _, c := range n.host.Network().ConnsToPeer(pid) {
-			if c.Stat().Direction == network.DirOutbound {
-				count++
-				break
-			}
+		if n.isDialedPeer(pid) {
+			count++
 		}
 	}
 	return count
@@ -178,12 +176,17 @@ func (n *Node) outboundPeerCount() int {
 // priority: we dialed it, it is a seed or whitelisted, or it delivered a block we
 // accepted. Anyone else can connect for free.
 func (n *Node) IsTrustedBlockSource(pid peer.ID) bool {
+	return n.isDialedPeer(pid) || (n.pex != nil && n.pex.isTrustedBlockSource(pid))
+}
+
+// isDialedPeer reports whether we hold a connection to this peer that we dialed.
+func (n *Node) isDialedPeer(pid peer.ID) bool {
 	for _, c := range n.host.Network().ConnsToPeer(pid) {
 		if c.Stat().Direction == network.DirOutbound {
 			return true
 		}
 	}
-	return n.pex != nil && n.pex.isTrustedBlockSource(pid)
+	return false
 }
 
 // PenalizePeer reduces a peer's reputation score
