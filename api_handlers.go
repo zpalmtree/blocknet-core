@@ -2857,12 +2857,12 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 
 	// Get mempool transactions sorted by fee rate together with the exact
 	// generation represented by this selection.
-	txs, mempoolGeneration := s.daemon.Mempool().GetTransactionsForBlockSnapshot(MaxBlockSize-1000, 1000)
+	txs, mempoolGeneration := s.daemon.Mempool().GetTransactionsForBlockSnapshot(blockSpaceForTransactions(coinbase.Tx), 1000)
 	header := BlockHeader{
 		Version:    1,
 		Height:     tp.Height,
 		PrevHash:   tp.PrevHash,
-		Timestamp:  time.Now().Unix(),
+		Timestamp:  s.daemon.Chain().templateTimestamp(tp.PrevHash, time.Now().Unix()),
 		Difficulty: tp.Difficulty,
 		Nonce:      0,
 	}
