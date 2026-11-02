@@ -72,6 +72,14 @@ claim can start a run for 2 minutes. A run most peers corroborate behaves as bef
 No field or endpoint changes, but `syncing` is false in more cases. It requires a
 rolling daemon deployment to apply.
 
+Transactions are relayed only after this node's mempool accepts them, in both the
+fluff path and when a stem transaction fluffs. A rejected transaction no longer
+bans or penalizes the sender. Instead, a peer whose transactions are rejected 32
+times in 10 minutes has its transactions ignored for the rest of that window, while
+its connection stays up. Stem payloads with no inputs are dropped without penalty.
+This changes no consensus, API or mining contract. It requires a rolling daemon
+deployment to apply.
+
 For the next refresh, start from current upstream master and replay only the
 remaining commits above, dropping accepted patches by content. Preserve any new
 `pool` work, test the complete tree, then retain the previous published pool tip
