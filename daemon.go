@@ -1,7 +1,6 @@
 package main
 
 import (
-	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,9 +87,9 @@ type Daemon struct {
 	cancel context.CancelFunc
 
 	// Guards expensive gossip block validation to bound CPU/RAM pressure.
-	gossipBlockGateMu      sync.Mutex
-	gossipBlockInFlight    int
-	gossipBlockLastAttempt *gossipAttemptLRU
+	blockIntakeMu        sync.Mutex
+	blockIntakeInFlight  map[[32]byte]struct{}
+	blockIntakeUntrusted bool
 
 	// Startup tip-freshness gate for mining templates (templateTipChecked).
 	syncStartedAt  atomic.Pointer[time.Time] // set when Start launches sync
@@ -102,16 +101,7 @@ type Daemon struct {
 	resolveSeedNodes func() []string
 }
 
-const (
-	// Keep expensive gossip validation bounded under announcement floods.
-	maxConcurrentGossipBlockValidations = 1
-	minGossipBlockValidationInterval    = 3 * time.Second
-
-	// Bound per-peer rate limit memory under peer-id churn.
-	// LRU eviction keeps active peers hot while bounding growth.
-	maxGossipBlockAttemptEntries = 4096
-	gossipBlockAttemptTTL        = 30 * time.Minute
-)
+const ()
 
 func verifyStoredGenesisMatchesRelaunchGenesis(chain *Chain) error {
 	if chain == nil {
@@ -143,74 +133,6 @@ func verifyStoredGenesisMatchesRelaunchGenesis(chain *Chain) error {
 type gossipAttemptEntry struct {
 	pid  peer.ID
 	last time.Time
-}
-
-type gossipAttemptLRU struct {
-	cap   int
-	lru   *list.List // front=MRU, back=LRU; values are gossipAttemptEntry
-	index map[peer.ID]*list.Element
-}
-
-func newGossipAttemptLRU(cap int) *gossipAttemptLRU {
-	if cap < 1 {
-		cap = 1
-	}
-	return &gossipAttemptLRU{
-		cap:   cap,
-		lru:   list.New(),
-		index: make(map[peer.ID]*list.Element, min(cap, 1024)),
-	}
-}
-
-func (c *gossipAttemptLRU) PurgeBefore(cutoff time.Time) {
-	if c == nil {
-		return
-	}
-	for {
-		back := c.lru.Back()
-		if back == nil {
-			return
-		}
-		ent := back.Value.(gossipAttemptEntry)
-		if ent.last.After(cutoff) {
-			return
-		}
-		c.lru.Remove(back)
-		delete(c.index, ent.pid)
-	}
-}
-
-func (c *gossipAttemptLRU) Get(pid peer.ID) (time.Time, bool) {
-	if c == nil {
-		return time.Time{}, false
-	}
-	if elem, ok := c.index[pid]; ok {
-		c.lru.MoveToFront(elem)
-		ent := elem.Value.(gossipAttemptEntry)
-		return ent.last, true
-	}
-	return time.Time{}, false
-}
-
-func (c *gossipAttemptLRU) Set(pid peer.ID, t time.Time) {
-	if c == nil {
-		return
-	}
-	if elem, ok := c.index[pid]; ok {
-		elem.Value = gossipAttemptEntry{pid: pid, last: t}
-		c.lru.MoveToFront(elem)
-	} else {
-		c.index[pid] = c.lru.PushFront(gossipAttemptEntry{pid: pid, last: t})
-	}
-	for c.lru.Len() > c.cap {
-		back := c.lru.Back()
-		if back == nil {
-			break
-		}
-		ent := back.Value.(gossipAttemptEntry)
-		c.lru.Remove(back)
-		delete(c.index, ent.pid)
-	}
 }
 
 // DaemonConfig configures the daemon
@@ -427,45 +349,35 @@ func NewDaemon(cfg DaemonConfig, stealthKeys *StealthKeys) (*Daemon, error) {
 	miner.config.PeerCount = func() int { return len(node.Peers()) }
 
 	d := &Daemon{
-		chain:                  chain,
-		mempool:                mempool,
-		miner:                  miner,
-		node:                   node,
-		stealthKeys:            stealthKeys,
-		checkpointsFile:        checkpointsPath(cfg.DataDir),
-		fullSync:               cfg.FullSync,
-		repairTruncatedTo:      repairTruncatedTo,
-		repairViolations:       repairViolations,
-		repairFailed:           repairFailed,
-		ctx:                    ctx,
-		cancel:                 cancel,
-		seedMode:               cfg.SeedMode,
-		listenAddrs:            cfg.ListenAddrs,
-		gossipBlockLastAttempt: newGossipAttemptLRU(maxGossipBlockAttemptEntries),
-		resolveSeedNodes:       cfg.ResolveSeedNodes,
+		chain:             chain,
+		mempool:           mempool,
+		miner:             miner,
+		node:              node,
+		stealthKeys:       stealthKeys,
+		checkpointsFile:   checkpointsPath(cfg.DataDir),
+		fullSync:          cfg.FullSync,
+		repairTruncatedTo: repairTruncatedTo,
+		repairViolations:  repairViolations,
+		repairFailed:      repairFailed,
+		ctx:               ctx,
+		cancel:            cancel,
+		seedMode:          cfg.SeedMode,
+		listenAddrs:       cfg.ListenAddrs,
+		resolveSeedNodes:  cfg.ResolveSeedNodes,
 	}
 
 	// Create sync manager with callbacks
 	syncCfg := p2p.SyncConfig{
-		GetStatus:         d.getChainStatus,
-		GetHeaders:        d.getHeaders,
-		GetBlocks:         d.getBlocks,
-		GetBlocksByHeight: d.getBlocksByHeight,
-		ProcessBlock:      d.processBlockData,
-		ProcessHeader:     nil, // Full-block sync, no header processing
-		GetMempool:        d.getMempoolTxs,
-		ProcessTx:         d.processTxData,
-		IsOrphanError: func(err error) bool {
-			if errors.Is(err, ErrOrphanBlock) {
-				return true
-			}
-			// "incomplete chain" means we're missing ancestor blocks locally —
-			// this is our problem, not the peer's. Don't penalize them.
-			if err != nil && strings.Contains(err.Error(), "incomplete chain") {
-				return true
-			}
-			return false
-		},
+		GetStatus:             d.getChainStatus,
+		GetHeaders:            d.getHeaders,
+		GetBlocks:             d.getBlocks,
+		GetBlocksByHeight:     d.getBlocksByHeight,
+		ProcessBlock:          d.processBlockData,
+		ProcessHeader:         nil, // Full-block sync, no header processing
+		GetMempool:            d.getMempoolTxs,
+		ProcessTx:             d.processTxData,
+		ProcessAnnouncedBlock: d.processAnnouncedBlock,
+		IsOrphanError:         isOrphanBlockError,
 		IsDuplicateError: func(err error) bool {
 			return errors.Is(err, ErrDuplicateBlock) || errors.Is(err, ErrSideChainBlock)
 		},
@@ -772,23 +684,23 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		return
 	}
 	decodedAt := time.Now()
-	if err := d.acquireGossipBlockValidationSlot(from); err != nil {
-		d.penalizeInvalidGossipPeer(from, p2p.ScorePenaltyMisbehave, err.Error())
+	preverification, finishIntake, err := d.verifyAnnouncedBlock(from, &block)
+	defer finishIntake()
+	slotAt := time.Now()
+	if err != nil {
+		d.handleAnnouncedBlockRejection(from, &block, err)
 		return
 	}
-	defer d.releaseGossipBlockValidationSlot()
-	slotAt := time.Now()
 
 	d.mu.Lock()
 	lockedAt := time.Now()
 
 	prevBest := d.chain.BestHash()
-	accepted, isMainChain, processTimings, err := d.chain.ProcessBlockTimed(&block)
+	accepted, isMainChain, processTimings, err := d.chain.ProcessPreverifiedBlockTimed(&block, preverification)
 	if err != nil || !accepted {
 		d.mu.Unlock()
 		if err != nil {
-			log.Printf("Rejected announced block at height %d from %s: %v", block.Header.Height, from.String()[:8], err)
-			d.penalizeInvalidGossipPeer(from, p2p.ScorePenaltyMisbehave, fmt.Sprintf("invalid block: %v", err))
+			d.handleAnnouncedBlockRejection(from, &block, err)
 		}
 		return
 	}
@@ -841,6 +753,112 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		mempoolAt.Sub(acceptedAt), checkpointAt.Sub(mempoolAt), relayAt.Sub(checkpointAt),
 		doneAt.Sub(relayAt), doneAt.Sub(receivedAt),
 	)
+}
+
+// errBlockIntakeBusy means an announced block wasn't verified because the slot for
+// peers without a track record is taken. It counts as a duplicate: nothing is
+// wrong with the block or its sender, and a peer we trust or a sync can deliver it.
+var errBlockIntakeBusy = fmt.Errorf("%w: block intake busy", ErrDuplicateBlock)
+
+func isOrphanBlockError(err error) bool {
+	if errors.Is(err, ErrOrphanBlock) {
+		return true
+	}
+	// "incomplete chain" means we're missing ancestor blocks locally: this is our
+	// problem, not the peer's.
+	return err != nil && strings.Contains(err.Error(), "incomplete chain")
+}
+
+// verifyAnnouncedBlock checks an announced block's proof of work and signatures
+// with no lock held, so announcements can't delay real blocks or our own
+// submissions. Each block is verified once at a time, and peers without a track
+// record share one slot, so they can't crowd out peers we trust. The returned
+// function must always be called.
+func (d *Daemon) verifyAnnouncedBlock(from peer.ID, block *Block) (BlockPreverification, func(), error) {
+	hash := block.Hash()
+	noop := func() {}
+	if d.chain.HasBlock(hash) {
+		return BlockPreverification{}, noop, ErrDuplicateBlock
+	}
+
+	d.blockIntakeMu.Lock()
+	if d.blockIntakeInFlight == nil {
+		d.blockIntakeInFlight = make(map[[32]byte]struct{})
+	}
+	if _, busy := d.blockIntakeInFlight[hash]; busy {
+		d.blockIntakeMu.Unlock()
+		return BlockPreverification{}, noop, ErrDuplicateBlock
+	}
+	d.blockIntakeInFlight[hash] = struct{}{}
+	d.blockIntakeMu.Unlock()
+
+	holdsUntrusted := false
+	finish := func() {
+		d.blockIntakeMu.Lock()
+		defer d.blockIntakeMu.Unlock()
+		delete(d.blockIntakeInFlight, hash)
+		if holdsUntrusted {
+			d.blockIntakeUntrusted = false
+		}
+	}
+
+	if !d.chain.NeedsPreverification(block) {
+		return BlockPreverification{}, finish, nil
+	}
+	if d.node != nil && !d.node.IsTrustedBlockSource(from) {
+		d.blockIntakeMu.Lock()
+		if d.blockIntakeUntrusted {
+			d.blockIntakeMu.Unlock()
+			if d.syncMgr != nil {
+				d.syncMgr.RequestSyncCheck()
+			}
+			return BlockPreverification{}, finish, errBlockIntakeBusy
+		}
+		d.blockIntakeUntrusted = true
+		holdsUntrusted = true
+		d.blockIntakeMu.Unlock()
+	}
+	preverification, err := d.chain.PreverifyBlock(block)
+	return preverification, finish, err
+}
+
+// handleAnnouncedBlockRejection decides what a rejected block on the gossip
+// protocol means for its sender. Only a block that is itself invalid counts.
+func (d *Daemon) handleAnnouncedBlockRejection(from peer.ID, block *Block, err error) {
+	switch {
+	case errors.Is(err, ErrDuplicateBlock):
+	case isOrphanBlockError(err):
+		if d.syncMgr != nil {
+			d.syncMgr.RequestSyncCheck()
+		}
+	default:
+		log.Printf("Rejected announced block at height %d from %s: %v", block.Header.Height, from.String()[:8], err)
+		d.penalizeInvalidGossipPeer(from, p2p.ScorePenaltyMisbehave, fmt.Sprintf("invalid block: %v", err))
+	}
+}
+
+// processAnnouncedBlock handles a block announced on the sync protocol.
+func (d *Daemon) processAnnouncedBlock(from peer.ID, data []byte) error {
+	var block Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		return err
+	}
+	if err := validateBlockCheapPrefilters(&block); err != nil {
+		return fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
+	}
+	preverification, finishIntake, err := d.verifyAnnouncedBlock(from, &block)
+	defer finishIntake()
+	if err != nil {
+		return wrapBlockRejection(&block, err)
+	}
+	return d.commitVerifiedBlock(&block, preverification)
+}
+
+func wrapBlockRejection(block *Block, err error) error {
+	if errors.Is(err, ErrDuplicateBlock) {
+		return err
+	}
+	return fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
 }
 
 // handleTx processes a transaction that reached fluff phase and reports whether
@@ -931,37 +949,6 @@ func (d *Daemon) penalizeInvalidGossipPeer(pid peer.ID, penalty int, reason stri
 	d.node.PenalizePeer(pid, penalty, reason)
 }
 
-func (d *Daemon) acquireGossipBlockValidationSlot(pid peer.ID) error {
-	d.gossipBlockGateMu.Lock()
-	defer d.gossipBlockGateMu.Unlock()
-
-	if d.gossipBlockLastAttempt == nil {
-		d.gossipBlockLastAttempt = newGossipAttemptLRU(maxGossipBlockAttemptEntries)
-	}
-
-	now := time.Now()
-	d.gossipBlockLastAttempt.PurgeBefore(now.Add(-gossipBlockAttemptTTL))
-
-	if last, ok := d.gossipBlockLastAttempt.Get(pid); ok && now.Sub(last) < minGossipBlockValidationInterval {
-		return fmt.Errorf("block gossip rate limit exceeded")
-	}
-	if d.gossipBlockInFlight >= maxConcurrentGossipBlockValidations {
-		return fmt.Errorf("block gossip validation busy")
-	}
-
-	d.gossipBlockLastAttempt.Set(pid, now)
-	d.gossipBlockInFlight++
-	return nil
-}
-
-func (d *Daemon) releaseGossipBlockValidationSlot() {
-	d.gossipBlockGateMu.Lock()
-	defer d.gossipBlockGateMu.Unlock()
-	if d.gossipBlockInFlight > 0 {
-		d.gossipBlockInFlight--
-	}
-}
-
 // Chain status callbacks for sync manager
 
 func (d *Daemon) getChainStatus() p2p.ChainStatus {
@@ -1020,14 +1007,22 @@ func (d *Daemon) processBlockData(data []byte) error {
 	if err := validateBlockCheapPrefilters(&block); err != nil {
 		return fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
 	}
+	preverification, err := d.chain.PreverifyBlock(&block)
+	if err != nil {
+		return wrapBlockRejection(&block, err)
+	}
+	return d.commitVerifiedBlock(&block, preverification)
+}
 
+// commitVerifiedBlock adds a block whose expensive checks already ran.
+func (d *Daemon) commitVerifiedBlock(block *Block, preverification BlockPreverification) error {
 	d.mu.Lock()
 
 	prevBest := d.chain.BestHash()
-	accepted, isMainChain, processTimings, err := d.chain.ProcessBlockTimed(&block)
+	accepted, isMainChain, processTimings, err := d.chain.ProcessPreverifiedBlockTimed(block, preverification)
 	if err != nil {
 		d.mu.Unlock()
-		return fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
+		return wrapBlockRejection(block, err)
 	}
 	if !accepted {
 		d.mu.Unlock()
@@ -1040,7 +1035,7 @@ func (d *Daemon) processBlockData(data []byte) error {
 		return ErrSideChainBlock
 	}
 
-	d.updateMempoolForAcceptedMainChain(&block, prevBest)
+	d.updateMempoolForAcceptedMainChain(block, prevBest)
 	d.mu.Unlock()
 
 	d.maybeSaveCheckpoints()
@@ -1463,9 +1458,16 @@ func (d *Daemon) SubmitBlock(block *Block) error {
 func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
 	var t submitBlockTimings
 	startedAt := time.Now()
+	preverification, err := d.chain.PreverifyBlock(block)
+	t.Process.Preverify = preverification.Duration
+	if err != nil {
+		d.observeRejectedSubmit(startedAt)
+		return t, fmt.Errorf("failed to process block: %w", err)
+	}
+	lockStartedAt := time.Now()
 	d.mu.Lock()
 	lockedAt := time.Now()
-	t.LockWait = lockedAt.Sub(startedAt)
+	t.LockWait = lockedAt.Sub(lockStartedAt)
 	if err := d.validateSubmitBlockStaleLocked(block); err != nil {
 		d.mu.Unlock()
 		d.observeRejectedSubmit(startedAt)
@@ -1475,7 +1477,7 @@ func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
 	t.StaleCheck = staleCheckedAt.Sub(lockedAt)
 
 	prevBest := d.chain.BestHash()
-	accepted, isMainChain, processTimings, err := d.chain.ProcessBlockTimed(block)
+	accepted, isMainChain, processTimings, err := d.chain.ProcessPreverifiedBlockTimed(block, preverification)
 	t.Process = processTimings
 	if err != nil {
 		d.mu.Unlock()

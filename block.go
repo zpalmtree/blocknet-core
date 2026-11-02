@@ -502,16 +502,6 @@ func validateBlockWithContext(
 	}
 	timing.TimestampRules = time.Since(timestampStartedAt)
 
-	if !skipPoW {
-		stage.Set("pow")
-		powStartedAt := time.Now()
-		if !validatePoW(header) {
-			timing.PoW = time.Since(powStartedAt)
-			return timing, fmt.Errorf("invalid proof of work")
-		}
-		timing.PoW = time.Since(powStartedAt)
-	}
-
 	stage.Set("block-shape")
 	blockShapeStartedAt := time.Now()
 	if block.Size() > MaxBlockSize {
@@ -543,6 +533,31 @@ func validateBlockWithContext(
 		timing.InputCount += len(tx.Inputs)
 	}
 	timing.BlockShape = time.Since(blockShapeStartedAt)
+
+	// Everything cheap comes before proof of work, so a block that fails one of
+	// these costs the sender as much as it costs us.
+	stage.Set("merkle-root")
+	merkleRootStartedAt := time.Now()
+	merkleRoot, err := block.ComputeMerkleRoot()
+	if err != nil {
+		timing.MerkleRoot = time.Since(merkleRootStartedAt)
+		return timing, fmt.Errorf("failed to compute merkle root: %w", err)
+	}
+	if merkleRoot != header.MerkleRoot {
+		timing.MerkleRoot = time.Since(merkleRootStartedAt)
+		return timing, fmt.Errorf("invalid merkle root")
+	}
+	timing.MerkleRoot = time.Since(merkleRootStartedAt)
+
+	if !skipPoW {
+		stage.Set("pow")
+		powStartedAt := time.Now()
+		if !validatePoW(header) {
+			timing.PoW = time.Since(powStartedAt)
+			return timing, fmt.Errorf("invalid proof of work")
+		}
+		timing.PoW = time.Since(powStartedAt)
+	}
 
 	stage.Set("tx-validation")
 	txValidationStartedAt := time.Now()
@@ -578,19 +593,6 @@ func validateBlockWithContext(
 		return timing, fmt.Errorf("invalid coinbase consensus commitment: %w", err)
 	}
 	timing.CoinbaseConsensus = time.Since(coinbaseConsensusStartedAt)
-
-	stage.Set("merkle-root")
-	merkleRootStartedAt := time.Now()
-	merkleRoot, err := block.ComputeMerkleRoot()
-	if err != nil {
-		timing.MerkleRoot = time.Since(merkleRootStartedAt)
-		return timing, fmt.Errorf("failed to compute merkle root: %w", err)
-	}
-	if merkleRoot != header.MerkleRoot {
-		timing.MerkleRoot = time.Since(merkleRootStartedAt)
-		return timing, fmt.Errorf("invalid merkle root")
-	}
-	timing.MerkleRoot = time.Since(merkleRootStartedAt)
 
 	return timing, nil
 }
@@ -1871,19 +1873,59 @@ func (c *Chain) ProcessBlock(block *Block) (accepted bool, isMainChain bool, err
 // attribute latency to the path (submit, gossip, sync) that delivered the block.
 func (c *Chain) ProcessBlockTimed(block *Block) (accepted bool, isMainChain bool, timings processBlockTimings, err error) {
 	startedAt := time.Now()
-	var preverifyDuration time.Duration
-	hash := block.Hash()
-	preverified := false
-	if block.Header.Height > 0 && !c.storage.HasBlock(hash) && !c.predictSkipVerification(block) && c.passesCheapPrecheck(block) {
-		preverifyStartedAt := time.Now()
-		if err := preverifyBlockCrypto(block); err != nil {
-			timings.Preverify = time.Since(preverifyStartedAt)
-			timings.Total = time.Since(startedAt)
-			return false, false, timings, err
-		}
-		preverifyDuration = time.Since(preverifyStartedAt)
-		preverified = true
+	preverification, err := c.PreverifyBlock(block)
+	if err != nil {
+		timings.Preverify = preverification.Duration
+		timings.Total = time.Since(startedAt)
+		return false, false, timings, err
 	}
+	return c.ProcessPreverifiedBlockTimed(block, preverification)
+}
+
+// BlockPreverification is the outcome of checking a block's proof of work and
+// signatures before any chain lock is taken.
+type BlockPreverification struct {
+	Verified bool
+	Duration time.Duration
+}
+
+// maxConcurrentBlockVerifications bounds PoW memory: each verification uses 2 GiB.
+const maxConcurrentBlockVerifications = 2
+
+var (
+	blockVerifySlots = make(chan struct{}, maxConcurrentBlockVerifications)
+	// runBlockPreverify is replaced in tests to avoid real PoW.
+	runBlockPreverify = preverifyBlockCrypto
+)
+
+// NeedsPreverification reports whether a block can pass every cheap check and so
+// is worth the cost of verifying its proof of work.
+func (c *Chain) NeedsPreverification(block *Block) bool {
+	return block.Header.Height > 0 && !c.storage.HasBlock(block.Hash()) && !c.predictSkipVerification(block) && c.passesCheapPrecheck(block)
+}
+
+// PreverifyBlock checks a block's proof of work and signatures. It takes no chain
+// lock, so callers must not hold one either: this takes about a second.
+func (c *Chain) PreverifyBlock(block *Block) (BlockPreverification, error) {
+	if !c.NeedsPreverification(block) {
+		return BlockPreverification{}, nil
+	}
+	startedAt := time.Now()
+	blockVerifySlots <- struct{}{}
+	defer func() { <-blockVerifySlots }()
+	if err := runBlockPreverify(block); err != nil {
+		return BlockPreverification{Duration: time.Since(startedAt)}, err
+	}
+	return BlockPreverification{Verified: true, Duration: time.Since(startedAt)}, nil
+}
+
+// ProcessPreverifiedBlockTimed adds a block to the chain, using the outcome of an
+// earlier PreverifyBlock.
+func (c *Chain) ProcessPreverifiedBlockTimed(block *Block, preverification BlockPreverification) (accepted bool, isMainChain bool, timings processBlockTimings, err error) {
+	startedAt := time.Now()
+	preverifyDuration := preverification.Duration
+	hash := block.Hash()
+	preverified := preverification.Verified
 	lockStartedAt := time.Now()
 	c.mu.Lock()
 	lockWaitDuration := time.Since(lockStartedAt)
