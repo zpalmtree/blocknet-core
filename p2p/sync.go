@@ -43,6 +43,15 @@ const (
 	syncHedgeMax       = 3 * time.Second
 	syncHedgePeers     = 3
 	syncGiveUpAfter    = 2 * time.Minute
+	// syncClaimGiveUpAfter ends a run following work only a minority of peers
+	// advertise, when no blocks arrive. Those blocks should arrive in seconds.
+	syncClaimGiveUpAfter = 30 * time.Second
+	// syncClaimCooldown is how long a peer's status is ignored after it
+	// advertised more work and did not deliver it.
+	syncClaimCooldown = 10 * time.Minute
+	// syncClaimRunSpacing is how long after such a run fails before any other
+	// minority claim may start one, so claims can't occupy the only sync run.
+	syncClaimRunSpacing = 2 * time.Minute
 	// syncProtectTag marks peers an active sync run downloads from.
 	syncProtectTag = "sync"
 )
@@ -149,6 +158,13 @@ type SyncManager struct {
 	resendMu       sync.Mutex
 	resends        map[peer.ID]map[uint64]*rangeResend
 	resendsPruneAt time.Time
+
+	// syncClaimUnverified marks a run whose target rests only on a status from
+	// a minority of peers. It clears when a block above the local tip arrives.
+	syncClaimUnverified bool
+	claimGiveUpAfter    time.Duration
+	claimCooldowns      map[peer.ID]time.Time
+	claimRunsResumeAt   time.Time
 }
 
 const (
@@ -260,6 +276,7 @@ func NewSyncManager(node *Node, cfg SyncConfig) *SyncManager {
 		statusSyncCh:      make(chan struct{}, 1),
 		// Debounce status-triggered sync checks; periodic syncLoop still runs.
 		statusSyncMinInterval: 2 * time.Second,
+		claimGiveUpAfter:      syncClaimGiveUpAfter,
 	}
 	if cfg.FetchBlocksByHash != nil {
 		sm.fetchBlocksByHash = cfg.FetchBlocksByHash
@@ -623,6 +640,11 @@ collectStatuses:
 		return
 	}
 
+	// Peers that recently failed to deliver the work they advertised don't
+	// count; they can't start another run until their cooldown ends.
+	responded := len(peerStatuses)
+	peerStatuses = sm.withoutCooledDownPeers(peerStatuses, time.Now())
+
 	// Find peers with the most work
 	var maxWork uint64
 	for _, ps := range peerStatuses {
@@ -662,8 +684,62 @@ collectStatuses:
 		}
 	}
 
+	corroborated := len(syncPeers)*2 > responded
+	if !corroborated && sm.claimRunsPaused(time.Now()) {
+		return
+	}
+
 	cryptoShuffle(syncPeers)
-	go sm.parallelSyncFrom(syncPeers, targetHeight)
+	go sm.parallelSyncFrom(syncPeers, targetHeight, corroborated)
+}
+
+// claimRunsPaused reports whether minority claims are waiting out a failed run.
+func (sm *SyncManager) claimRunsPaused(now time.Time) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return now.Before(sm.claimRunsResumeAt)
+}
+
+// withoutCooledDownPeers drops peers whose advertised work is being ignored and
+// forgets cooldowns that have ended.
+func (sm *SyncManager) withoutCooledDownPeers(statuses []PeerStatus, now time.Time) []PeerStatus {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for p, until := range sm.claimCooldowns {
+		if !now.Before(until) {
+			delete(sm.claimCooldowns, p)
+		}
+	}
+	if len(sm.claimCooldowns) == 0 {
+		return statuses
+	}
+	kept := make([]PeerStatus, 0, len(statuses))
+	for _, ps := range statuses {
+		if _, cooling := sm.claimCooldowns[ps.Peer]; !cooling {
+			kept = append(kept, ps)
+		}
+	}
+	return kept
+}
+
+// syncRunUnverified reports whether the active run's target is still unproven.
+func (sm *SyncManager) syncRunUnverified() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.syncClaimUnverified
+}
+
+// peerIDsForLog names up to three of a run's peers for its log line.
+func peerIDsForLog(peers []PeerStatus) string {
+	const maxLogged = 3
+	ids := make([]string, 0, maxLogged)
+	for i, ps := range peers {
+		if i == maxLogged {
+			break
+		}
+		ids = append(ids, ps.Peer.String())
+	}
+	return strings.Join(ids, ",")
 }
 
 // getStatusFrom requests status from a peer
@@ -711,8 +787,10 @@ func (sm *SyncManager) getStatusFrom(p peer.ID) (ChainStatus, error) {
 	return status, nil
 }
 
-// parallelSyncFrom performs parallel chain sync from multiple peers
-func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64) {
+// parallelSyncFrom performs parallel chain sync from multiple peers. corroborated
+// says most responding peers advertise the target's work. Without that, the run
+// doesn't count as being behind until a block above the local tip arrives.
+func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64, corroborated bool) {
 	sm.mu.Lock()
 	// A peer is ahead. Mark the tip checked only under the lock that registers
 	// the sync run, so PeerTipChecked never reads true while IsSyncing and
@@ -728,6 +806,7 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 	}
 	sm.syncStartTime = time.Now()
 	sm.syncTarget = targetHeight
+	sm.syncClaimUnverified = !corroborated
 	sm.downloadBuffer = make(map[uint64]DownloadedBlock) // Reset buffer
 	sm.mu.Unlock()
 
@@ -738,6 +817,7 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 		sm.syncing = false
 		sm.syncPeer = ""
 		sm.syncTarget = 0
+		sm.syncClaimUnverified = false
 		sm.syncProgress = 0
 		sm.downloadBuffer = make(map[uint64]DownloadedBlock) // Clear buffer
 		sm.mu.Unlock()
@@ -858,7 +938,11 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 				case <-ctx.Done():
 					return
 				case <-stall.C:
-					if time.Since(lastProgress) > syncGiveUpAfter {
+					giveUpAfter := syncGiveUpAfter
+					if sm.syncRunUnverified() {
+						giveUpAfter = sm.claimGiveUpAfter
+					}
+					if time.Since(lastProgress) > giveUpAfter {
 						return
 					}
 					if hedging.CompareAndSwap(false, true) {
@@ -888,6 +972,9 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 			// Update progress
 			sm.mu.Lock()
 			sm.syncProgress = nextHeight
+			if accepted && nextHeight > ourStatus.Height {
+				sm.syncClaimUnverified = false
+			}
 			delete(sm.downloadBuffer, nextHeight)
 			sm.mu.Unlock()
 
@@ -922,8 +1009,12 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 
 	finalHeight := sm.getStatus().Height
 	if finalHeight < targetHeight && sm.ctx.Err() == nil {
-		log.Printf("[sync] incomplete block sync: local=%d target=%d next=%d peers=%d elapsed=%s",
-			finalHeight, targetHeight, nextHeight, len(peers), time.Since(sm.syncStartTime).Round(time.Millisecond))
+		unverified := sm.syncRunUnverified()
+		log.Printf("[sync] incomplete block sync: local=%d target=%d next=%d peers=%d (%s) unverified=%t elapsed=%s",
+			finalHeight, targetHeight, nextHeight, len(peers), peerIDsForLog(peers), unverified, time.Since(sm.syncStartTime).Round(time.Millisecond))
+		if unverified {
+			sm.coolDownPeers(peers, time.Now(), penalizeTimeout)
+		}
 	}
 
 	// After syncing blocks, request mempool — try each sync peer until one succeeds.
@@ -953,6 +1044,23 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64)
 			case <-sm.ctx.Done():
 			}
 		}()
+	}
+}
+
+// coolDownPeers ignores these peers' advertised work for syncClaimCooldown and
+// holds off runs for any other minority claim for syncClaimRunSpacing.
+func (sm *SyncManager) coolDownPeers(peers []PeerStatus, now time.Time, penalize func(peer.ID)) {
+	sm.mu.Lock()
+	if sm.claimCooldowns == nil {
+		sm.claimCooldowns = make(map[peer.ID]time.Time)
+	}
+	for _, ps := range peers {
+		sm.claimCooldowns[ps.Peer] = now.Add(syncClaimCooldown)
+	}
+	sm.claimRunsResumeAt = now.Add(syncClaimRunSpacing)
+	sm.mu.Unlock()
+	for _, ps := range peers {
+		penalize(ps.Peer)
 	}
 }
 
@@ -1507,13 +1615,17 @@ func (sm *SyncManager) IsSyncingFarBehind(tolerance uint64) bool {
 }
 
 // BlocksBehind reports how many blocks an active sync run's target is ahead
-// of the local chain tip, or 0 when no run is active or the tip is current.
+// of the local chain tip. It is 0 when no run is active, the tip is current, or
+// the target is an unverified claim from a minority of peers: a single peer's
+// status must not read as this node being behind, since it would stop template
+// serving and payouts for as long as the run lasts.
 func (sm *SyncManager) BlocksBehind() uint64 {
 	sm.mu.RLock()
 	syncing := sm.syncing
 	target := sm.syncTarget
+	unverified := sm.syncClaimUnverified
 	sm.mu.RUnlock()
-	if !syncing {
+	if !syncing || unverified {
 		return 0
 	}
 	// Compare against the live chain tip rather than syncProgress: the

@@ -1304,8 +1304,9 @@ type DaemonLastProcessBlockStats struct {
 }
 
 // DaemonStats is the daemon status report. Syncing means the chain is behind
-// the best peer tip; a sync run that only re-downloads blocks the node already
-// has (after briefly losing a propagation race) leaves it false, while
+// the best peer tip. A sync run that only re-downloads blocks the node already
+// has (after briefly losing a propagation race), or that follows a tip only a
+// minority of peers advertise and none has delivered, leaves it false, while
 // SyncInProgress reports any active run.
 type DaemonStats struct {
 	PID                 int                             `json:"pid"`
