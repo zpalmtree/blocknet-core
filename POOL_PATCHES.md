@@ -68,7 +68,7 @@ the local commit by content once its PR is merged.
 
 | Commit | Purpose | Upstream |
 | --- | --- | --- |
-| `3efcf43` | Reject null block transactions; size and stamp templates within consensus limits | PR #72 |
+| `3efcf43` | Reject null block transactions; size and stamp templates within consensus limits | PR #72, merged upstream as `f89cf36` |
 | `a0149bf` | Drop and evict transactions the chain would reject when building a template; recheck after reorgs | PR #73 |
 | `155954b` | Verify announced blocks outside the locks; one slot for untrusted peers; no bans for busy, duplicate or orphan | PR #74 |
 | `b8465b5`, `b15c174`, `d613f1c`, `12f08d0`, `3737282` | Peer status is a claim until dialed peers or delivered blocks back it; per-peer stream and serve limits; protect dialed peers; reorg-limit rejection | PR #75 |
