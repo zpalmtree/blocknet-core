@@ -1233,6 +1233,11 @@ func (sm *SyncManager) parallelSyncFrom(peers []PeerStatus, targetHeight uint64,
 				if deliveredBlocks >= syncBehindProofBlocks {
 					sm.syncClaimUnverified = false
 				}
+				// Blocks arriving well past what dialed peers claim prove the higher
+				// target is real, so the node keeps counting as behind until it's reached.
+				if corroborated && nextHeight >= behindTarget+syncBehindProofBlocks {
+					sm.syncBehindTarget = targetHeight
+				}
 			}
 			delete(sm.downloadBuffer, nextHeight)
 			sm.mu.Unlock()

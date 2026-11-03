@@ -493,3 +493,25 @@ func TestHighestWorkPeerGetsADownloader(t *testing.T) {
 		}()
 	}
 }
+
+func TestBlocksPastTheDialedMedianKeepTheNodeBehind(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	const ours, median, top = 100, 101, 1000
+	// Most dialed peers lag just ahead of us; one holds the real chain.
+	for _, p := range startOutcomePeers(t, local, 2, outcomeStatus(median, median*10)) {
+		p.blocks = outcomeBlocksUpTo(median)
+	}
+	holder := startOutcomePeers(t, local, 1, outcomeStatus(top, top*10))[0]
+	holder.blocks = outcomeBlocksUpTo(top)
+
+	chain := &outcomeChain{height: ours, work: ours * 10, process: 5 * time.Millisecond}
+	sm := newOutcomeManager(t, local, chain, 5*time.Second)
+	sm.checkSync()
+	waitOutcome(t, "blocks past the median", 10*time.Second, func() bool { return chain.status().Height >= median+syncBehindProofBlocks+2 })
+	if !sm.IsSyncingFarBehind(2) {
+		t.Fatalf("at height %d of %d the node should count as behind", chain.status().Height, top)
+	}
+	sm.cancel()
+	waitOutcome(t, "the canceled run to end", 5*time.Second, func() bool { return !sm.IsSyncing() })
+}
