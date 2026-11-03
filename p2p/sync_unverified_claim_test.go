@@ -132,8 +132,9 @@ func TestUndeliveredMinorityClaimEndsAndCoolsDownThePeer(t *testing.T) {
 	if !sm.claimCoolingDown(claimer) {
 		t.Fatal("peer that did not deliver its claim was not cooled down")
 	}
-	if got, want := local.pex.GetPeerScore(claimer.PeerID()), 50+ScorePenaltyTimeout; got != want {
-		t.Fatalf("peer score = %d, want %d", got, want)
+	// A cooldown costs no score: honest peers can stall too, and repeats would ban them.
+	if got := local.pex.GetPeerScore(claimer.PeerID()); got != -1 && got < peerStartingScore {
+		t.Fatalf("peer score = %d", got)
 	}
 
 	seen := requests.Load()
@@ -491,11 +492,18 @@ func TestSyncStalled(t *testing.T) {
 	}
 
 	sm.syncRunCorroborated = true
+	sm.syncBehindTarget = 5000 // The local chain is at 100.
 	dataAt(time.Hour)
 	if sm.syncStalled(now.Add(-31*time.Second), now) {
 		t.Fatal("a corroborated run must keep syncGiveUpAfter")
 	}
 	if !sm.syncStalled(now.Add(-syncGiveUpAfter-time.Second), now) {
 		t.Fatal("a corroborated run must still give up")
+	}
+
+	// Past what dialed peers claim, a stranger's higher claim gets the short limit.
+	sm.syncBehindTarget = 100
+	if !sm.syncStalled(now.Add(-31*time.Second), now) {
+		t.Fatal("a run past the height dialed peers claim must give up quickly")
 	}
 }

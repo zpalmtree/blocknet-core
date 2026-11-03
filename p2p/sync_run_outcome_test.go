@@ -224,7 +224,7 @@ func TestFirstBadReplyDoesNotCoolHonestPeers(t *testing.T) {
 	chain := &outcomeChain{height: 10, work: 100}
 	sm := newOutcomeManager(t, local, chain, 5*time.Second)
 	sm.checkSync()
-	waitOutcome(t, "the run to start", 5*time.Second, sm.IsSyncing)
+	waitOutcome(t, "the liar's bad reply", 5*time.Second, func() bool { return liar.requests.Load() > 0 })
 	waitOutcome(t, "the run to end", 15*time.Second, func() bool { return !sm.IsSyncing() })
 	if got := cooledCount(sm, honest); got != 0 {
 		t.Fatalf("a false claimer's bad block cooled %d honest peers", got)
@@ -286,8 +286,8 @@ func TestOnePeerCannotTakeEveryServeSlot(t *testing.T) {
 	serveSM.ctx, serveSM.cancel = context.WithCancel(context.Background())
 	defer serveSM.cancel()
 	server.host.SetStreamHandler(protocolID(params.ProtocolSync), serveSM.HandleStream)
-	// Few enough slots that the flooder's share is all of them.
-	serveSM.serveSlots = make(chan struct{}, syncMaxServesPerPeer)
+	// Eight slots, so a flooder's share is all that strangers may use.
+	serveSM.serveSlots = make(chan struct{}, 8)
 
 	held := make([]func(), 0, syncMaxServesPerPeer)
 	for i := 0; i < syncMaxServesPerPeer; i++ {
@@ -303,8 +303,8 @@ func TestOnePeerCannotTakeEveryServeSlot(t *testing.T) {
 		}
 	}()
 
-	// With no slot free, an honest request gets an empty answer, not an error, so
-	// it costs the peer nothing and it can ask elsewhere.
+	// With no slot it may use, a stranger's request gets an empty answer, not an
+	// error, so it costs the peer nothing and it can ask elsewhere.
 	client := NewSyncManager(honest, SyncConfig{GetStatus: func() ChainStatus { return outcomeStatus(10, 100) }})
 	client.ctx, client.cancel = context.WithCancel(context.Background())
 	defer client.cancel()
@@ -339,5 +339,157 @@ func TestOutboundRefillStaysWithinItsBudget(t *testing.T) {
 	local.pex.refillOutbound()
 	if got := local.pex.dialsInFlight.Load(); got > 2 {
 		t.Fatalf("%d dials for 2 missing peers", got)
+	}
+}
+
+// startInboundOutcomePeers connects peers that dialed us.
+func startInboundOutcomePeers(t *testing.T, local *Node, count int, status ChainStatus) []*outcomePeer {
+	t.Helper()
+	peers := make([]*outcomePeer, count)
+	for i := range peers {
+		node := mustNewTestNode(t)
+		t.Cleanup(func() { _ = node.Stop() })
+		mustConnectNodes(t, node, local)
+		p := &outcomePeer{node: node, status: status}
+		node.host.SetStreamHandler(protocolID(params.ProtocolSync), p.serve)
+		peers[i] = p
+	}
+	return peers
+}
+
+func TestStrangerCannotBorrowDialedPeersCredibility(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	// Normal propagation: most of our dialed peers just got the next block.
+	dialed := startOutcomePeers(t, local, 3, outcomeStatus(11, 110))
+	for _, p := range dialed {
+		p.silent.Store(true) // Still sending it, so the run stays open.
+	}
+	liar := startInboundOutcomePeers(t, local, 1, outcomeStatus(100000, 1000000))[0]
+	liar.silent.Store(true)
+
+	chain := &outcomeChain{height: 10, work: 100}
+	sm := newOutcomeManager(t, local, chain, 500*time.Millisecond)
+	sm.fetchEWMA.Store(int64(time.Millisecond))
+	sm.checkSync()
+	waitOutcome(t, "the run to start", 5*time.Second, sm.IsSyncing)
+	if got := sm.BlocksBehind(); got != 1 {
+		t.Fatalf("blocks behind = %d, want the 1 our dialed peers claim", got)
+	}
+	if sm.IsSyncingFarBehind(2) {
+		t.Fatal("a stranger's claim stopped template serving")
+	}
+	sm.cancel()
+	waitOutcome(t, "the run to end", 5*time.Second, func() bool { return !sm.IsSyncing() })
+}
+
+func TestLiarIsCooledOnceDialedPeersClaimIsMet(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	dialed := startOutcomePeers(t, local, 3, outcomeStatus(11, 110))
+	for _, p := range dialed {
+		p.blocks = outcomeBlocksUpTo(11)
+	}
+	liar := startOutcomePeers(t, local, 1, outcomeStatus(100000, 1000000))[0]
+	liar.silent.Store(true)
+	startOutcomePeers(t, local, 1, outcomeStatus(10, 100))
+
+	chain := &outcomeChain{height: 10, work: 100}
+	sm := newOutcomeManager(t, local, chain, 400*time.Millisecond)
+	sm.fetchEWMA.Store(int64(time.Millisecond))
+	started := time.Now()
+	sm.checkSync()
+	waitOutcome(t, "the dialed peers' block", 5*time.Second, func() bool { return chain.status().Height == 11 })
+	waitOutcome(t, "the run to give up", 10*time.Second, func() bool { return !sm.IsSyncing() })
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("the run took %s", elapsed)
+	}
+	if !sm.claimCoolingDown(liar.node) {
+		t.Fatal("a peer claiming far past what our dialed peers claim should cool down")
+	}
+	if got := cooledCount(sm, dialed); got != 0 {
+		t.Fatalf("%d dialed peers cooled though their claim was met", got)
+	}
+}
+
+func TestFewDialedPeersCannotMarkTheNodeBehind(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	// One dialed peer, the attacker, and everyone else level with us.
+	liar := startOutcomePeers(t, local, 1, outcomeStatus(5000, 50000))[0]
+	liar.silent.Store(true)
+	startInboundOutcomePeers(t, local, 5, outcomeStatus(10, 100))
+
+	chain := &outcomeChain{height: 10, work: 100}
+	sm := newOutcomeManager(t, local, chain, 300*time.Millisecond)
+	sm.checkSync()
+	waitOutcome(t, "the run to start", 5*time.Second, sm.IsSyncing)
+	if sm.IsSyncingFarBehind(2) {
+		t.Fatal("a single dialed peer stopped template serving")
+	}
+	waitOutcome(t, "the run to end", 10*time.Second, func() bool { return !sm.IsSyncing() })
+	if !sm.claimCoolingDown(liar.node) {
+		t.Fatal("the claimer should cool down")
+	}
+}
+
+func TestDialedMajorityThatDeliversNothingMustProveItselfNext(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	liars := startOutcomePeers(t, local, 3, outcomeStatus(5000, 50000))
+	for _, p := range liars {
+		p.silent.Store(true)
+	}
+	chain := &outcomeChain{height: 10, work: 100}
+	sm := newOutcomeManager(t, local, chain, 200*time.Millisecond)
+	sm.fetchEWMA.Store(int64(time.Millisecond))
+	sm.pauseCorroboration = true
+
+	sm.checkSync()
+	waitOutcome(t, "the run to start", 5*time.Second, sm.IsSyncing)
+	if sm.IsSyncingFarBehind(2) {
+		t.Fatal("the run after an empty corroborated run must prove itself")
+	}
+	waitOutcome(t, "the run to end", 10*time.Second, func() bool { return !sm.IsSyncing() })
+	if got := cooledCount(sm, liars); got == 0 {
+		t.Fatal("peers that keep delivering nothing should cool down")
+	}
+}
+
+func TestCheckDuringARunIsNotLost(t *testing.T) {
+	local := mustNewTestNode(t)
+	defer func() { _ = local.Stop() }()
+	sm := newOutcomeManager(t, local, &outcomeChain{height: 10, work: 100}, time.Second)
+	sm.mu.Lock()
+	sm.syncing = true
+	sm.mu.Unlock()
+	sm.checkSync()
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if !sm.recheckAfterRun {
+		t.Fatal("a check during a run should be remembered")
+	}
+}
+
+func TestHighestWorkPeerGetsADownloader(t *testing.T) {
+	for round := 0; round < 8; round++ {
+		func() {
+			local := mustNewTestNode(t)
+			defer func() { _ = local.Stop() }()
+			const ours, lagging, top = 100, 101, 105
+			// More lagging peers than downloaders, so the top peer needs its place.
+			startOutcomePeers(t, local, 1, outcomeStatus(top, top*10))[0].blocks = outcomeBlocksUpTo(top)
+			for _, p := range startOutcomePeers(t, local, 11, outcomeStatus(lagging, lagging*10)) {
+				p.blocks = outcomeBlocksUpTo(lagging)
+			}
+			chain := &outcomeChain{height: ours, work: ours * 10}
+			sm := newOutcomeManager(t, local, chain, 5*time.Second)
+			started := time.Now()
+			sm.checkSync()
+			waitOutcome(t, "the top height", 15*time.Second, func() bool { return chain.status().Height == top })
+			if elapsed := time.Since(started); elapsed >= syncHedgeMin {
+				t.Fatalf("round %d: reaching the top took %s", round, elapsed)
+			}
+		}()
 	}
 }

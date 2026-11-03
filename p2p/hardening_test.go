@@ -149,7 +149,8 @@ func TestFluffedRecordsDropTheirData(t *testing.T) {
 }
 
 func TestServeSlotsAreBoundedPerPeerAndInTotal(t *testing.T) {
-	sm := &SyncManager{serveSlots: make(chan struct{}, syncMaxServesPerPeer+2), servesByPeer: make(map[peer.ID]int)}
+	// A quarter of the slots stay free for trusted peers: 6 of 8 for anyone else.
+	sm := &SyncManager{serveSlots: make(chan struct{}, 8), servesByPeer: make(map[peer.ID]int)}
 	busy := peer.ID("busy")
 	var releases []func()
 	for i := 0; i < syncMaxServesPerPeer; i++ {
@@ -162,16 +163,8 @@ func TestServeSlotsAreBoundedPerPeerAndInTotal(t *testing.T) {
 	if _, ok := sm.acquireServeSlot(busy); ok {
 		t.Fatal("one peer took more than its share")
 	}
-	other := peer.ID("other")
-	for i := 0; i < 2; i++ {
-		release, ok := sm.acquireServeSlot(other)
-		if !ok {
-			t.Fatal("another peer was refused while slots were free")
-		}
-		releases = append(releases, release)
-	}
-	if _, ok := sm.acquireServeSlot(peer.ID("third")); ok {
-		t.Fatal("the total limit was exceeded")
+	if _, ok := sm.acquireServeSlot(peer.ID("other")); ok {
+		t.Fatal("a peer with no track record took a reserved slot")
 	}
 	for _, release := range releases {
 		release()
@@ -181,5 +174,25 @@ func TestServeSlotsAreBoundedPerPeerAndInTotal(t *testing.T) {
 	}
 	if _, ok := sm.acquireServeSlot(busy); !ok {
 		t.Fatal("a released slot should be reusable")
+	}
+}
+
+func TestReservedServeSlotsStayOpenForPeersWeChose(t *testing.T) {
+	server := mustNewTestNode(t)
+	defer func() { _ = server.Stop() }()
+	chosen := mustNewTestNode(t)
+	defer func() { _ = chosen.Stop() }()
+	mustConnectNodes(t, server, chosen)
+	sm := &SyncManager{node: server, serveSlots: make(chan struct{}, 8), servesByPeer: make(map[peer.ID]int)}
+	for i := 0; i < 6; i++ {
+		if _, ok := sm.acquireServeSlot(peer.ID("stranger-" + string(rune('a'+i)))); !ok {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if _, ok := sm.acquireServeSlot(peer.ID("one-more-stranger")); ok {
+		t.Fatal("strangers took a reserved slot")
+	}
+	if _, ok := sm.acquireServeSlot(chosen.PeerID()); !ok {
+		t.Fatal("a peer we dialed should get a reserved slot")
 	}
 }
