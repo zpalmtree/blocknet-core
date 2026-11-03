@@ -2826,7 +2826,6 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 	// Read height, prevHash, and difficulty as a single atomic snapshot so a
 	// concurrent reorg cannot produce an inconsistent template.
 	tp := s.daemon.Chain().TemplateParams()
-	reward := GetBlockReward(tp.Height)
 
 	// Optionally override the coinbase destination (pool/dev-fee switching).
 	var recipientSpendPub, recipientViewPub [32]byte
@@ -2846,13 +2845,15 @@ func (s *APIServer) handleBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		rewardAddrUsed = loadedWallet.Address()
 	}
 
-	// Create coinbase paying to the selected reward address
+	// Create coinbase paying to the selected reward address, then start the one
+	// the next height's first template will need.
 	coinbaseStartedAt := time.Now()
-	coinbase, err := CreateCoinbase(recipientSpendPub, recipientViewPub, reward, tp.Height)
+	coinbase, err := s.templateCoinbases.take(coinbaseKey{recipientSpendPub, recipientViewPub, tp.Height})
 	if err != nil {
 		writeInternal(w, r, http.StatusInternalServerError, "internal error", err)
 		return
 	}
+	s.templateCoinbases.prebuild(coinbaseKey{recipientSpendPub, recipientViewPub, tp.Height + 1})
 	mempoolStartedAt := time.Now()
 
 	// Get mempool transactions sorted by fee rate together with the exact
