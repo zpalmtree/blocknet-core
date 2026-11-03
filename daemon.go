@@ -396,14 +396,6 @@ func NewDaemon(cfg DaemonConfig, stealthKeys *StealthKeys) (*Daemon, error) {
 			}
 			return block.Hash(), nil
 		},
-		OnBlockAccepted: func(data []byte) {
-			d.miner.NotifyNewBlock()
-			var block Block
-			if err := json.Unmarshal(data, &block); err == nil {
-				d.recordTipAccepted(block.Hash(), tipSourceSync, time.Time{}, time.Now())
-				d.notifyBlock(&block)
-			}
-		},
 	}
 	d.syncMgr = p2p.NewSyncManager(node, syncCfg)
 
@@ -713,18 +705,19 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 	}
 	acceptedAt := time.Now()
 
+	// Peers need nothing from the mempool update, so the block goes out first.
+	d.node.RelayBlock(from, data)
+	relayAt := time.Now()
 	d.updateMempoolForAcceptedMainChain(&block, prevBest)
 	d.mu.Unlock()
 	mempoolAt := time.Now()
 
 	hash := block.Hash()
 	d.recordTipAccepted(hash, tipSourceGossip, receivedAt, acceptedAt)
-	d.maybeSaveCheckpoints()
-	checkpointAt := time.Now()
-	d.node.RelayBlock(from, data)
-	relayAt := time.Now()
 	d.notifyBlock(&block)
 	d.miner.NotifyNewBlock()
+	notifiedAt := time.Now()
+	d.maybeSaveCheckpoints()
 	doneAt := time.Now()
 
 	lanes := []struct {
@@ -735,10 +728,10 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		{"slot_wait", slotAt.Sub(decodedAt)},
 		{"lock_wait", lockedAt.Sub(slotAt)},
 		{"process", processTimings.Total},
-		{"mempool_update", mempoolAt.Sub(acceptedAt)},
-		{"checkpoint_save", checkpointAt.Sub(mempoolAt)},
-		{"relay", relayAt.Sub(checkpointAt)},
-		{"notify", doneAt.Sub(relayAt)},
+		{"relay", relayAt.Sub(acceptedAt)},
+		{"mempool_update", mempoolAt.Sub(relayAt)},
+		{"notify", notifiedAt.Sub(mempoolAt)},
+		{"checkpoint_save", doneAt.Sub(notifiedAt)},
 		{"received_to_accepted", acceptedAt.Sub(receivedAt)},
 		{"total", doneAt.Sub(receivedAt)},
 	}
@@ -751,8 +744,8 @@ func (d *Daemon) handleBlock(from peer.ID, data []byte) {
 		decodedAt.Sub(receivedAt), slotAt.Sub(decodedAt), lockedAt.Sub(slotAt),
 		processTimings.Total, processTimings.Preverify, processTimings.LockWait,
 		processTimings.Validate, processTimings.Detail.PoW, processTimings.Reorg,
-		mempoolAt.Sub(acceptedAt), checkpointAt.Sub(mempoolAt), relayAt.Sub(checkpointAt),
-		doneAt.Sub(relayAt), doneAt.Sub(receivedAt),
+		mempoolAt.Sub(relayAt), doneAt.Sub(notifiedAt), relayAt.Sub(acceptedAt),
+		notifiedAt.Sub(mempoolAt), doneAt.Sub(receivedAt),
 	)
 }
 
@@ -849,21 +842,32 @@ func (d *Daemon) handleAnnouncedBlockRejection(from peer.ID, block *Block, err e
 	}
 }
 
-// processAnnouncedBlock handles a block announced on the sync protocol.
-func (d *Daemon) processAnnouncedBlock(from peer.ID, data []byte) error {
+// processAnnouncedBlock handles a block announced on the sync protocol. Once the
+// block is accepted, the sync manager relays it and then runs the returned
+// function, which notifies subscribers and saves checkpoints.
+func (d *Daemon) processAnnouncedBlock(from peer.ID, data []byte) (func(), error) {
 	var block Block
 	if err := json.Unmarshal(data, &block); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateBlockCheapPrefilters(&block); err != nil {
-		return fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
+		return nil, fmt.Errorf("rejected p2p block at height %d: %w", block.Header.Height, err)
 	}
 	preverification, finishIntake, err := d.verifyAnnouncedBlock(from, &block)
 	defer finishIntake()
 	if err != nil {
-		return wrapBlockRejection(&block, err)
+		return nil, wrapBlockRejection(&block, err)
 	}
-	return d.commitVerifiedBlock(&block, preverification)
+	acceptedAt, err := d.acceptVerifiedBlock(&block, preverification)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		d.miner.NotifyNewBlock()
+		d.recordTipAccepted(block.Hash(), tipSourceSync, time.Time{}, acceptedAt)
+		d.notifyBlock(&block)
+		d.maybeSaveCheckpoints()
+	}, nil
 }
 
 func wrapBlockRejection(block *Block, err error) error {
@@ -1029,30 +1033,39 @@ func (d *Daemon) processBlockData(data []byte) error {
 
 // commitVerifiedBlock adds a block whose expensive checks already ran.
 func (d *Daemon) commitVerifiedBlock(block *Block, preverification BlockPreverification) error {
+	if _, err := d.acceptVerifiedBlock(block, preverification); err != nil {
+		return err
+	}
+	d.maybeSaveCheckpoints()
+	return nil
+}
+
+// acceptVerifiedBlock is commitVerifiedBlock without the checkpoint save. It
+// returns when the block became the main-chain tip.
+func (d *Daemon) acceptVerifiedBlock(block *Block, preverification BlockPreverification) (time.Time, error) {
 	d.mu.Lock()
 
 	prevBest := d.chain.BestHash()
 	accepted, isMainChain, processTimings, err := d.chain.ProcessPreverifiedBlockTimed(block, preverification)
 	if err != nil {
 		d.mu.Unlock()
-		return wrapBlockRejection(block, err)
+		return time.Time{}, wrapBlockRejection(block, err)
 	}
 	if !accepted {
 		d.mu.Unlock()
-		return ErrDuplicateBlock
+		return time.Time{}, ErrDuplicateBlock
 	}
 	d.latency.observeProcessBlock(tipSourceSync, processTimings)
 
 	if !isMainChain {
 		d.mu.Unlock()
-		return ErrSideChainBlock
+		return time.Time{}, ErrSideChainBlock
 	}
+	acceptedAt := time.Now()
 
 	d.updateMempoolForAcceptedMainChain(block, prevBest)
 	d.mu.Unlock()
-
-	d.maybeSaveCheckpoints()
-	return nil
+	return acceptedAt, nil
 }
 
 func (d *Daemon) SetSaveCheckpoints(enabled bool) {
@@ -1471,6 +1484,10 @@ func (d *Daemon) SubmitBlock(block *Block) error {
 func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
 	var t submitBlockTimings
 	startedAt := time.Now()
+	// Encode the announcement while the proof of work is checked, so peers get
+	// the block as soon as it is accepted.
+	marshaled := make(chan []byte, 1)
+	go func() { marshaled <- marshalBlockJSON(block) }()
 	preverification, err := d.chain.PreverifyOwnBlock(block)
 	t.Process.Preverify = preverification.Duration
 	if err != nil {
@@ -1504,39 +1521,40 @@ func (d *Daemon) SubmitBlockTimed(block *Block) (submitBlockTimings, error) {
 	}
 	acceptedAt := time.Now()
 
+	// Broadcast to peers first: nothing below changes what they receive.
+	// Marshal is the time spent waiting for the encoding started above.
+	blockData := <-marshaled
+	marshaledAt := time.Now()
+	t.Marshal = marshaledAt.Sub(acceptedAt)
+	d.syncMgr.BroadcastBlock(blockData)
+	broadcastAt := time.Now()
+	t.Broadcast = broadcastAt.Sub(marshaledAt)
+
 	if isMainChain {
 		d.updateMempoolForAcceptedMainChain(block, prevBest)
 		d.miner.NotifyNewBlock()
 	}
 	d.mu.Unlock()
 	mempoolAt := time.Now()
-	t.MempoolUpdate = mempoolAt.Sub(acceptedAt)
-
-	hash := block.Hash()
-	if isMainChain {
-		d.recordTipAccepted(hash, tipSourceSubmit, startedAt, acceptedAt)
-		d.maybeSaveCheckpoints()
-	}
-	checkpointAt := time.Now()
-	t.CheckpointSave = checkpointAt.Sub(mempoolAt)
-
-	// Broadcast to peers
-	blockData := marshalBlockJSON(block)
-	marshaledAt := time.Now()
-	t.Marshal = marshaledAt.Sub(checkpointAt)
-	d.syncMgr.BroadcastBlock(blockData)
-	broadcastAt := time.Now()
-	t.Broadcast = broadcastAt.Sub(marshaledAt)
+	t.MempoolUpdate = mempoolAt.Sub(broadcastAt)
 
 	// Notify wallet/UI subscribers only for blocks that became main-chain.
 	// Side-chain blocks may be accepted for fork choice, but scanning them would
 	// record outputs the wallet cannot spend on the canonical chain.
+	hash := block.Hash()
 	if isMainChain {
+		d.recordTipAccepted(hash, tipSourceSubmit, startedAt, acceptedAt)
 		d.notifyBlock(block)
 	}
 	d.notifyMinedBlock(block)
+	notifiedAt := time.Now()
+	t.Notify = notifiedAt.Sub(mempoolAt)
+
+	if isMainChain {
+		d.maybeSaveCheckpoints()
+	}
 	doneAt := time.Now()
-	t.Notify = doneAt.Sub(broadcastAt)
+	t.CheckpointSave = doneAt.Sub(notifiedAt)
 	t.Total = doneAt.Sub(startedAt)
 
 	d.latency.observeProcessBlock(tipSourceSubmit, processTimings)
