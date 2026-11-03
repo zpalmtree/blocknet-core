@@ -79,6 +79,19 @@ The upstream versions leave out pool-only pieces: `BlocksBehind` and the status
 fields that use it, and sync-peer protection from connection trimming. Each requires
 a rolling daemon deployment.
 
+## Hot-path concurrency patches
+
+Not yet deployed. Each is an upstream candidate except where noted; none changes
+consensus or an API shape.
+
+| Commit | Purpose | Upstream |
+| --- | --- | --- |
+| `739c2fd` | Verify a transaction's RingCT signatures and range proofs in parallel | Candidate |
+| `cd7ffa0` | Relay or broadcast accepted blocks before the mempool update, notification and checkpoint save; encode submitted blocks during PoW | Candidate; the submit timing fields are pool-only diagnostics |
+| `57ca954` | Prebuild the next height's template coinbase | Candidate |
+| `0c5c834` | Opt-in parallel output and input building in the wallet builder (`TransferConfig.Parallelism`) | Candidate |
+| `f99a952` | Parallel block-range decoding for sync serving and wallet-feed pages, parallel `ScanBlock` matching and mempool sync | Candidate, without the wallet-feed part |
+
 ## Other branch work to review separately
 
 `harden-block-intake` at `fdf2387` is not part of the published pool stack used
