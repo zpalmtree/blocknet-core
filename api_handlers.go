@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"blocknet/wallet"
@@ -3440,7 +3441,10 @@ func (s *APIServer) walletSendChainStates(txIDs [][32]byte, chainHeight uint64) 
 	return states, nil
 }
 
+// walletTxBuildTimings sums the time spent in each builder callback. The
+// builder runs callbacks in parallel, so the sums can exceed wall time.
 type walletTxBuildTimings struct {
+	mu                 sync.Mutex
 	ringSelectDuration time.Duration
 	ringSelectCount    int
 	ringSignDuration   time.Duration
@@ -3456,7 +3460,10 @@ func (t *walletTxBuildTimings) recordRingSelect(start time.Time) {
 	if t == nil {
 		return
 	}
-	t.ringSelectDuration += time.Since(start)
+	elapsed := time.Since(start)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ringSelectDuration += elapsed
 	t.ringSelectCount++
 }
 
@@ -3464,7 +3471,10 @@ func (t *walletTxBuildTimings) recordRingSign(start time.Time) {
 	if t == nil {
 		return
 	}
-	t.ringSignDuration += time.Since(start)
+	elapsed := time.Since(start)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ringSignDuration += elapsed
 	t.ringSignCount++
 }
 
@@ -3472,7 +3482,10 @@ func (t *walletTxBuildTimings) recordRangeProof(start time.Time) {
 	if t == nil {
 		return
 	}
-	t.rangeProofDuration += time.Since(start)
+	elapsed := time.Since(start)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rangeProofDuration += elapsed
 	t.rangeProofCount++
 }
 
@@ -3480,7 +3493,10 @@ func (t *walletTxBuildTimings) recordCommitment(start time.Time) {
 	if t == nil {
 		return
 	}
-	t.commitmentDuration += time.Since(start)
+	elapsed := time.Since(start)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.commitmentDuration += elapsed
 	t.commitmentCount++
 }
 
@@ -3488,7 +3504,10 @@ func (t *walletTxBuildTimings) recordTxID(start time.Time) {
 	if t == nil {
 		return
 	}
-	t.txIDDuration += time.Since(start)
+	elapsed := time.Since(start)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.txIDDuration += elapsed
 }
 
 // createTxBuilder creates a transaction builder wired to the daemon (same as CLI).
@@ -3565,6 +3584,7 @@ func (s *APIServer) createTxBuilderWithTimings(timings *walletTxBuildTimings) *w
 		RingSize:    RingSize,
 		MinFee:      sendMinFee,
 		FeePerByte:  sendFeePerByte,
+		Parallelism: runtime.GOMAXPROCS(0),
 	}
 
 	return wallet.NewBuilder(s.wallet, cfg)
