@@ -72,7 +72,7 @@ local commit by content at the next refresh once its PR is merged.
 | `2691164` | Treat wallet outputs sharing a one-time key as one coin | PR #71, merged upstream as `fc0f973` (same wallet code; local API and test adapt to pool status fields) |
 | `a0149bf` | Drop and evict transactions the chain would reject when building a template; recheck after reorgs | PR #73, merged upstream as `35f6c83` |
 | `155954b` | Verify announced blocks outside the locks; one slot for untrusted peers; no bans for busy, duplicate or orphan | PR #74, merged upstream as `2ee075b` |
-| `b8465b5`, `b15c174`, `d613f1c`, `12f08d0`, `3737282` | Peer status is a claim until dialed peers or delivered blocks back it; per-peer stream and serve limits; protect dialed peers; reorg-limit rejection | PR #75 |
+| `b8465b5`, `b15c174`, `d613f1c`, `12f08d0`, `3737282` | Peer status is a claim until dialed peers or delivered blocks back it; per-peer stream and serve limits; protect dialed peers; reorg-limit rejection | PR #75, merged upstream as `6337acc` |
 | `86ccb22` | Keep the first-seen branch unless another is longer or more than half a block heavier; sync uses the same rule | PR #76 |
 
 The upstream versions leave out pool-only pieces: `BlocksBehind` and the status
