@@ -61,16 +61,17 @@ submit unchanged. Upstream's fewer-input selection may reduce their necessity,
 but explicit-input sends and sweeps still need evaluation before removing them.
 Keep the existing concurrency bound and authenticated API behavior.
 
-## Security patches pending upstream
+## Security patches sent upstream
 
-Live on bntpool since 2026-11-02 20:05 EST. Each maps to an open upstream PR; drop
-the local commit by content once its PR is merged.
+Live on bntpool since 2026-11-02 20:05 EST. Each maps to an upstream PR; drop the
+local commit by content at the next refresh once its PR is merged.
 
 | Commit | Purpose | Upstream |
 | --- | --- | --- |
 | `3efcf43` | Reject null block transactions; size and stamp templates within consensus limits | PR #72, merged upstream as `f89cf36` |
-| `a0149bf` | Drop and evict transactions the chain would reject when building a template; recheck after reorgs | PR #73 |
-| `155954b` | Verify announced blocks outside the locks; one slot for untrusted peers; no bans for busy, duplicate or orphan | PR #74 |
+| `2691164` | Treat wallet outputs sharing a one-time key as one coin | PR #71, merged upstream as `fc0f973` (same wallet code; local API and test adapt to pool status fields) |
+| `a0149bf` | Drop and evict transactions the chain would reject when building a template; recheck after reorgs | PR #73, merged upstream as `35f6c83` |
+| `155954b` | Verify announced blocks outside the locks; one slot for untrusted peers; no bans for busy, duplicate or orphan | PR #74, merged upstream as `2ee075b` |
 | `b8465b5`, `b15c174`, `d613f1c`, `12f08d0`, `3737282` | Peer status is a claim until dialed peers or delivered blocks back it; per-peer stream and serve limits; protect dialed peers; reorg-limit rejection | PR #75 |
 
 The upstream versions leave out pool-only pieces: `BlocksBehind` and the status
