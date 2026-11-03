@@ -81,15 +81,7 @@ func (c *Chain) CanonicalRange(from uint64, limit int) (tipHeight uint64, tipHas
 	if span := uint64(limit - 1); from+span < end {
 		end = from + span
 	}
-	blocks = make([]*Block, 0, end-from+1)
-	for h := from; h <= end; h++ {
-		b := c.getBlockByHeightLocked(h)
-		if b == nil {
-			break
-		}
-		blocks = append(blocks, b)
-	}
-	return tipHeight, tipHash, blocks
+	return tipHeight, tipHash, c.mainChainBlocksLocked(from, end)
 }
 
 // handleWalletFeedBlocks serves GET /api/wallet-feed/blocks?from=<height>&limit=<n>.

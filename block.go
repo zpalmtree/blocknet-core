@@ -1702,6 +1702,36 @@ func (c *Chain) isMainChainHashLocked(height uint64, hash [32]byte) bool {
 	return ok && mainHash == hash
 }
 
+// mainChainBlocksLocked returns the main-chain blocks from height from through
+// end, stopping at the first missing one. Blocks that aren't cached load from
+// storage in parallel. Caller must hold at least c.mu.RLock.
+func (c *Chain) mainChainBlocksLocked(from, end uint64) []*Block {
+	if from > end {
+		return nil
+	}
+	blocks := make([]*Block, int(end-from+1))
+	var uncached []int
+	for i := range blocks {
+		if hash, ok := c.byHeight[from+uint64(i)]; ok {
+			if block, ok := c.blocks[hash]; ok {
+				blocks[i] = block
+				continue
+			}
+		}
+		uncached = append(uncached, i)
+	}
+	forEachParallel(len(uncached), func(k int) {
+		i := uncached[k]
+		blocks[i] = c.getBlockByHeightLocked(from + uint64(i))
+	})
+	for i, block := range blocks {
+		if block == nil {
+			return blocks[:i]
+		}
+	}
+	return blocks
+}
+
 // getBlockByHeightLocked is the lock-safe inner implementation.
 // Caller must hold at least c.mu.RLock. It never mutates caches.
 func (c *Chain) getBlockByHeightLocked(height uint64) *Block {
