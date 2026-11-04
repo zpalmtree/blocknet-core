@@ -93,6 +93,7 @@ shape.
 | `57ca954` | Prebuild the next height's template coinbase | PR #77 |
 | `0c5c834` | Opt-in parallel output and input building in the wallet builder (`TransferConfig.Parallelism`) | PR #77 |
 | `f99a952` | Parallel block-range decoding for sync serving and wallet-feed pages, parallel `ScanBlock` matching and mempool sync | PR #77, without the wallet-feed part |
+| `e138a18` | Share one process-wide helper pool across parallel checks | PR #77 |
 
 ## Other branch work to review separately
 
