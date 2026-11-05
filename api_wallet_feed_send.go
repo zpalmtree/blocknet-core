@@ -32,12 +32,14 @@ func (s *APIServer) handleWalletFeedParams(w http.ResponseWriter, r *http.Reques
 	// at most 1000 transactions.
 	mp := s.daemon.Mempool()
 	typical := wallet.EstimateTxSizeBytes(2, 2, RingSize)
-	rate := func(blocks int) uint64 { return mp.FeeRateFor(blocks, MaxBlockSize-1000, 1000, typical, sendFeePerByte) }
+	rate := func(blocks int) uint64 {
+		return mp.FeeRateFor(blocks, MaxBlockSize-1000, 1000, typical, sendFeePerByte)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"network":                   network,
-		"ring_size":                 RingSize,
-		"min_fee":                   sendMinFee,
-		"fee_per_byte":              sendFeePerByte,
+		"network":      network,
+		"ring_size":    RingSize,
+		"min_fee":      sendMinFee,
+		"fee_per_byte": sendFeePerByte,
 		"fee_rates": map[string]any{
 			"next_block":      rate(1),
 			"within_3_blocks": rate(3),
