@@ -26,11 +26,24 @@ func (s *APIServer) handleWalletFeedParams(w http.ResponseWriter, r *http.Reques
 	if params.IsTestnet {
 		network = "testnet"
 	}
+	// What a typical send (two inputs, two outputs) needs per byte to be
+	// mined soon, from this node's mempool: fee_per_byte while blocks have
+	// room. Templates leave 1000 bytes for the header and coinbase and take
+	// at most 1000 transactions.
+	mp := s.daemon.Mempool()
+	typical := wallet.EstimateTxSizeBytes(2, 2, RingSize)
+	rate := func(blocks int) uint64 { return mp.FeeRateFor(blocks, MaxBlockSize-1000, 1000, typical, sendFeePerByte) }
 	writeJSON(w, http.StatusOK, map[string]any{
 		"network":                   network,
 		"ring_size":                 RingSize,
 		"min_fee":                   sendMinFee,
 		"fee_per_byte":              sendFeePerByte,
+		"fee_rates": map[string]any{
+			"next_block":      rate(1),
+			"within_3_blocks": rate(3),
+			"mempool_bytes":   mp.SizeBytes(),
+			"mempool_count":   mp.Size(),
+		},
 		"indexed_derivation_height": params.IndexedDerivationHeight,
 		"coinbase_maturity":         wallet.CoinbaseMaturity,
 		"safe_confirmations":        wallet.SafeConfirmations,

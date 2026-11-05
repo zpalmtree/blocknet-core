@@ -51,6 +51,24 @@
                     "fee_per_byte": {
                       "type": "integer"
                     },
+                    "fee_rates": {
+                      "type": "object",
+                      "description": "Fee per byte a typical send (two inputs, two outputs) needs to be mined within the next block or three, estimated from this node's mempool; fee_per_byte while blocks have room.",
+                      "properties": {
+                        "next_block": {
+                          "type": "integer"
+                        },
+                        "within_3_blocks": {
+                          "type": "integer"
+                        },
+                        "mempool_bytes": {
+                          "type": "integer"
+                        },
+                        "mempool_count": {
+                          "type": "integer"
+                        }
+                      }
+                    },
                     "indexed_derivation_height": {
                       "type": "integer"
                     },

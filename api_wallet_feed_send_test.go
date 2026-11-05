@@ -102,8 +102,13 @@ func TestWalletFeedExternalSignerRoundTrip(t *testing.T) {
 		MinFee     uint64 `json:"min_fee"`
 		FeePerByte uint64 `json:"fee_per_byte"`
 		Network    string `json:"network"`
+		FeeRates   struct {
+			NextBlock     uint64 `json:"next_block"`
+			Within3Blocks uint64 `json:"within_3_blocks"`
+		} `json:"fee_rates"`
 	}
-	if code := feedGet(t, mux, "/api/wallet-feed/params", &p); code != 200 || p.RingSize != RingSize || p.MinFee != sendMinFee || p.FeePerByte != sendFeePerByte || p.Network != "testnet" {
+	if code := feedGet(t, mux, "/api/wallet-feed/params", &p); code != 200 || p.RingSize != RingSize || p.MinFee != sendMinFee || p.FeePerByte != sendFeePerByte || p.Network != "testnet" ||
+		p.FeeRates.NextBlock != sendFeePerByte || p.FeeRates.Within3Blocks != sendFeePerByte {
 		t.Fatalf("params %d %+v", code, p)
 	}
 
